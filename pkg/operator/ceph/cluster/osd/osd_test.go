@@ -47,7 +47,7 @@ func TestStart(t *testing.T) {
 		CephVersion: cephver.Nautilus,
 	}
 	c := New(clusterInfo, &clusterd.Context{Clientset: clientset, ConfigDir: "/var/lib/rook", Executor: &exectest.MockExecutor{}}, "ns", "myversion", cephv1.CephVersionSpec{},
-		rookalpha.StorageScopeSpec{}, "", rookalpha.Placement{}, rookalpha.Annotations{}, false, v1.ResourceRequirements{}, metav1.OwnerReference{})
+		rookalpha.StorageScopeSpec{}, "", rookalpha.Placement{}, rookalpha.Annotations{}, cephv1.NetworkSpec{}, v1.ResourceRequirements{}, metav1.OwnerReference{}, false)
 
 	// Start the first time
 	err := c.Start()
@@ -125,7 +125,7 @@ func TestAddRemoveNode(t *testing.T) {
 		CephVersion: cephver.Nautilus,
 	}
 	c := New(clusterInfo, &clusterd.Context{Clientset: clientset, ConfigDir: "/var/lib/rook", Executor: &exectest.MockExecutor{}}, "ns-add-remove", "myversion", cephv1.CephVersionSpec{},
-		storageSpec, "/foo", rookalpha.Placement{}, rookalpha.Annotations{}, false, v1.ResourceRequirements{}, metav1.OwnerReference{})
+		storageSpec, "/foo", rookalpha.Placement{}, rookalpha.Annotations{}, cephv1.NetworkSpec{}, v1.ResourceRequirements{}, metav1.OwnerReference{}, false)
 
 	// kick off the start of the orchestration in a goroutine
 	var startErr error
@@ -154,7 +154,7 @@ func TestAddRemoveNode(t *testing.T) {
 	// simulate the OSD pod having been created
 	osdPod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{
 		Name:   "osdPod",
-		Labels: map[string]string{k8sutil.AppAttr: appName}}}
+		Labels: map[string]string{k8sutil.AppAttr: AppName}}}
 	c.context.Clientset.CoreV1().Pods(c.Namespace).Create(osdPod)
 
 	// mock the ceph calls that will be called during remove node
@@ -210,7 +210,7 @@ func TestAddRemoveNode(t *testing.T) {
 	// modify the storage spec to remove the node from the cluster
 	storageSpec.Nodes = []rookalpha.Node{}
 	c = New(clusterInfo, &clusterd.Context{Clientset: clientset, ConfigDir: "/var/lib/rook", Executor: mockExec}, "ns-add-remove", "myversion", cephv1.CephVersionSpec{},
-		storageSpec, "", rookalpha.Placement{}, rookalpha.Annotations{}, false, v1.ResourceRequirements{}, metav1.OwnerReference{})
+		storageSpec, "", rookalpha.Placement{}, rookalpha.Annotations{}, cephv1.NetworkSpec{}, v1.ResourceRequirements{}, metav1.OwnerReference{}, false)
 
 	// reset the orchestration status watcher
 	statusMapWatcher = watch.NewFake()
@@ -252,7 +252,7 @@ func TestDiscoverOSDs(t *testing.T) {
 		CephVersion: cephver.Nautilus,
 	}
 	c := New(clusterInfo, &clusterd.Context{}, "ns", "myversion", cephv1.CephVersionSpec{},
-		rookalpha.StorageScopeSpec{}, "", rookalpha.Placement{}, rookalpha.Annotations{}, false, v1.ResourceRequirements{}, metav1.OwnerReference{})
+		rookalpha.StorageScopeSpec{}, "", rookalpha.Placement{}, rookalpha.Annotations{}, cephv1.NetworkSpec{}, v1.ResourceRequirements{}, metav1.OwnerReference{}, false)
 	node1 := "n1"
 	node2 := "n2"
 
@@ -335,7 +335,7 @@ func TestAddNodeFailure(t *testing.T) {
 		CephVersion: cephver.Nautilus,
 	}
 	c := New(clusterInfo, &clusterd.Context{Clientset: clientset, ConfigDir: "/var/lib/rook", Executor: &exectest.MockExecutor{}}, "ns-add-remove", "myversion", cephv1.CephVersionSpec{},
-		storageSpec, "/foo", rookalpha.Placement{}, rookalpha.Annotations{}, false, v1.ResourceRequirements{}, metav1.OwnerReference{})
+		storageSpec, "/foo", rookalpha.Placement{}, rookalpha.Annotations{}, cephv1.NetworkSpec{}, v1.ResourceRequirements{}, metav1.OwnerReference{}, false)
 
 	// kick off the start of the orchestration in a goroutine
 	var startErr error

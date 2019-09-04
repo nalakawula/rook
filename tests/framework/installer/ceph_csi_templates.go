@@ -138,7 +138,7 @@ const (
                 path: /lib/modules
             - name: socket-dir
               hostPath:
-                path: /var/lib/kubelet/plugins/rbd.csi.ceph.com
+                path: /var/lib/kubelet/plugins/{{ .DriverNamePrefix }}rbd.csi.ceph.com
                 type: DirectoryOrCreate
             - name: ceph-csi-config
               configMap:
@@ -178,7 +178,7 @@ const (
               args:
                 - "--v=5"
                 - "--csi-address=/csi/csi.sock"
-                - "--kubelet-registration-path=/var/lib/kubelet/plugins/rbd.csi.ceph.com/csi.sock"
+                - "--kubelet-registration-path=/var/lib/kubelet/plugins/{{ .DriverNamePrefix }}rbd.csi.ceph.com/csi.sock"
               lifecycle:
                 preStop:
                   exec:
@@ -247,7 +247,7 @@ const (
           volumes:
             - name: plugin-dir
               hostPath:
-                path: /var/lib/kubelet/plugins/rbd.csi.ceph.com
+                path: /var/lib/kubelet/plugins/{{ .DriverNamePrefix }}rbd.csi.ceph.com
                 type: DirectoryOrCreate
             - name: plugin-mount-dir
               hostPath:
@@ -372,7 +372,7 @@ const (
           volumes:
             - name: socket-dir
               hostPath:
-                path: /var/lib/kubelet/plugins/cephfs.csi.ceph.com
+                path: /var/lib/kubelet/plugins/{{ .DriverNamePrefix }}cephfs.csi.ceph.com
                 type: DirectoryOrCreate
             - name: host-sys
               hostPath:
@@ -420,7 +420,7 @@ const (
               args:
                 - "--v=5"
                 - "--csi-address=/csi/csi.sock"
-                - "--kubelet-registration-path=/var/lib/kubelet/plugins/cephfs.csi.ceph.com/csi.sock"
+                - "--kubelet-registration-path=/var/lib/kubelet/plugins/{{ .DriverNamePrefix }}cephfs.csi.ceph.com/csi.sock"
               lifecycle:
                 preStop:
                   exec:
@@ -487,7 +487,7 @@ const (
           volumes:
             - name: plugin-dir
               hostPath:
-                path: /var/lib/kubelet/plugins/cephfs.csi.ceph.com/
+                path: /var/lib/kubelet/plugins/{{ .DriverNamePrefix }}cephfs.csi.ceph.com/
                 type: DirectoryOrCreate
             - name: csi-plugins-dir
               hostPath:

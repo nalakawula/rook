@@ -40,6 +40,8 @@ type CephManifests interface {
 	GetNFS(namepace, name, pool string, daemonCount int) string
 	GetObjectStore(namespace, name string, replicaCount, port int) string
 	GetObjectStoreUser(namespace, name string, displayName string, store string) string
+	GetBucketStorageClass(namespace string, storeName string, storageClassName string, reclaimPolicy string, region string) string
+	GetObc(obcName string, storageClassName string, bucketName string, createBucket bool) string
 }
 
 type ClusterSettings struct {
@@ -88,6 +90,7 @@ spec:
       properties:
         spec:
           properties:
+            annotations: {}
             cephVersion:
               properties:
                 allowUnsupported:
@@ -100,6 +103,12 @@ spec:
                   type: boolean
                 urlPrefix:
                   type: string
+                port:
+                  type: integer
+                  minimum: 0
+                  maximum: 65535
+                ssl:
+                  type: boolean
             dataDirHostPath:
               pattern: ^/(\S+)
               type: string
@@ -119,12 +128,84 @@ spec:
                   type: boolean
             storage:
               properties:
-                nodes:
-                  items: {}
-                  type: array
-                useAllDevices: {}
                 useAllNodes:
                   type: boolean
+                nodes:
+                  items:
+                    properties:
+                      name:
+                        type: string
+                      config:
+                        properties:
+                          metadataDevice:
+                            type: string
+                          storeType:
+                            type: string
+                            pattern: ^(filestore|bluestore)$
+                          databaseSizeMB:
+                            type: string
+                          walSizeMB:
+                            type: string
+                          journalSizeMB:
+                            type: string
+                          osdsPerDevice:
+                            type: string
+                          encryptedDevice:
+                            type: string
+                            pattern: ^(true|false)$
+                      useAllDevices:
+                        type: boolean
+                      deviceFilter: {}
+                      directories:
+                        type: array
+                        items:
+                          properties:
+                            path:
+                              type: string
+                      devices:
+                        type: array
+                        items:
+                          properties:
+                            name:
+                              type: string
+                            config: {}
+                      location: {}
+                      resources: {}
+                  type: array
+                useAllDevices:
+                  type: boolean
+                deviceFilter: {}
+                location: {}
+                directories:
+                  type: array
+                  items:
+                    properties:
+                      path:
+                        type: string
+                config: {}
+                topologyAware:
+                  type: boolean
+            monitoring:
+              properties:
+                enabled:
+                  type: boolean
+                rulesNamespace:
+                  type: string
+            rbdMirroring:
+              properties:
+                workers:
+                  type: integer
+            placement: {}
+            resources: {}
+            configOverrides:
+              items:
+                properties:
+                  who:
+                    type: string
+                  option:
+                    type: string
+                  value:
+                    type: string
           required:
           - mon
   additionalPrinterColumns:
@@ -161,6 +242,50 @@ spec:
     singular: cephfilesystem
   scope: Namespaced
   version: v1
+  validation:
+    openAPIV3Schema:
+      properties:
+        spec:
+          properties:
+            metadataServer:
+              properties:
+                activeCount:
+                  type: integer
+                activeStandby:
+                  type: boolean
+                annotations: {}
+                placement: {}
+                resources: {}
+            metadataPool:
+              properties:
+                failureDomain:
+                  type: string
+                replicated:
+                  properties:
+                    size:
+                      type: integer
+                erasureCoded:
+                  properties:
+                    dataChunks:
+                      type: integer
+                    codingChunks:
+                      type: integer
+            dataPools:
+              type: array
+              items:
+                properties:
+                  failureDomain:
+                    type: string
+                  replicated:
+                    properties:
+                      size:
+                        type: integer
+                  erasureCoded:
+                    properties:
+                      dataChunks:
+                        type: integer
+                      codingChunks:
+                        type: integer
   additionalPrinterColumns:
     - name: MdsCount
       type: string
@@ -185,6 +310,24 @@ spec:
     - nfs
   scope: Namespaced
   version: v1
+  validation:
+    openAPIV3Schema:
+      properties:
+        spec:
+          properties:
+            rados:
+              properties:
+                pool:
+                  type: string
+                namespace:
+                  type: string
+            server:
+              properties:
+                active:
+                  type: integer
+                annotations: {}
+                placement: {}
+                resources: {}
 ---
 apiVersion: apiextensions.k8s.io/v1beta1
 kind: CustomResourceDefinition
@@ -199,6 +342,52 @@ spec:
     singular: cephobjectstore
   scope: Namespaced
   version: v1
+  validation:
+    openAPIV3Schema:
+      properties:
+        spec:
+          properties:
+            gateway:
+              properties:
+                type:
+                  type: string
+                sslCertificateRef: {}
+                port:
+                  type: integer
+                securePort: {}
+                instances:
+                  type: integer
+                annotations: {}
+                placement: {}
+                resources: {}
+            metadataPool:
+              properties:
+                failureDomain:
+                  type: string
+                replicated:
+                  properties:
+                    size:
+                      type: integer
+                erasureCoded:
+                  properties:
+                    dataChunks:
+                      type: integer
+                    codingChunks:
+                      type: integer
+            dataPool:
+              properties:
+                failureDomain:
+                  type: string
+                replicated:
+                  properties:
+                    size:
+                      type: integer
+                erasureCoded:
+                  properties:
+                    dataChunks:
+                      type: integer
+                    codingChunks:
+                      type: integer
 ---
 apiVersion: apiextensions.k8s.io/v1beta1
 kind: CustomResourceDefinition
@@ -240,7 +429,51 @@ spec:
     plural: volumes
     singular: volume
   scope: Namespaced
-  version: v1alpha2`
+  version: v1alpha2
+---
+apiVersion: apiextensions.k8s.io/v1beta1
+kind: CustomResourceDefinition
+metadata:
+  name: objectbuckets.objectbucket.io
+spec:
+  group: objectbucket.io
+  versions:
+    - name: v1alpha1
+      served: true
+      storage: true
+  names:
+    kind: ObjectBucket
+    listKind: ObjectBucketList
+    plural: objectbuckets
+    singular: objectbucket
+    shortNames:
+      - ob
+      - obs
+  scope: Cluster
+  subresources:
+    status: {}
+---
+apiVersion: apiextensions.k8s.io/v1beta1
+kind: CustomResourceDefinition
+metadata:
+  name: objectbucketclaims.objectbucket.io
+spec:
+  versions:
+    - name: v1alpha1
+      served: true
+      storage: true
+  group: objectbucket.io
+  names:
+    kind: ObjectBucketClaim
+    listKind: ObjectBucketClaimList
+    plural: objectbucketclaims
+    singular: objectbucketclaim
+    shortNames:
+      - obc
+      - obcs
+  scope: Namespaced
+  subresources:
+    status: {}`
 }
 
 // GetRookOperator returns rook Operator manifest
@@ -278,6 +511,7 @@ rules:
   resources:
   - daemonsets
   - statefulsets
+  - deployments
   verbs:
   - get
   - list
@@ -677,7 +911,10 @@ rules:
     verbs: ["get", "list", "watch"]
   - apiGroups: ["apiextensions.k8s.io"]
     resources: ["customresourcedefinitions"]
-    verbs: ["create"]
+    verbs: ["create", "list", "watch", "delete", "get", "update"]
+  - apiGroups: ["snapshot.storage.k8s.io"]
+    resources: ["volumesnapshots/status"]
+    verbs: ["update"]
   - apiGroups: [""]
     resources: ["nodes"]
     verbs: ["get", "list", "watch"]
@@ -711,6 +948,9 @@ rules:
   - apiGroups: [""]
     resources: ["configmaps"]
     verbs: ["get", "list", "watch", "create", "delete"]
+  - apiGroups: ["coordination.k8s.io"]
+    resources: ["leases"]
+    verbs: ["get", "watch", "list", "delete", "update", "create"]
 ---
 kind: RoleBinding
 apiVersion: rbac.authorization.k8s.io/v1
@@ -719,7 +959,7 @@ metadata:
   namespace: ` + namespace + `
 subjects:
   - kind: ServiceAccount
-    name: rbd-csi-provisioner
+    name: rook-csi-rbd-provisioner-sa
     namespace: ` + namespace + `
 roleRef:
   kind: Role
@@ -850,6 +1090,9 @@ rules:
   - apiGroups: [""]
     resources: ["configmaps"]
     verbs: ["get", "list", "create", "delete"]
+  - apiGroups: ["coordination.k8s.io"]
+    resources: ["leases"]
+    verbs: ["get", "watch", "list", "delete", "update", "create"]
 ---
 kind: RoleBinding
 apiVersion: rbac.authorization.k8s.io/v1
@@ -858,7 +1101,7 @@ metadata:
   namespace: ` + namespace + `
 subjects:
   - kind: ServiceAccount
-    name: cephfs-csi-provisioner
+    name: rook-csi-cephfs-provisioner-sa
     namespace: ` + namespace + `
 roleRef:
   kind: Role
@@ -1060,6 +1303,52 @@ spec:
           value: "true"
         - name: ROOK_CSI_ENABLE_RBD
           value: "true"
+        - name: ROOK_CSI_ENABLE_GRPC_METRICS
+          value: "true"
+---
+kind: ClusterRoleBinding
+apiVersion: rbac.authorization.k8s.io/v1beta1
+metadata:
+  name: rook-ceph-object-bucket
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: rook-ceph-object-bucket
+subjects:
+  - kind: ServiceAccount
+    name: rook-ceph-system
+    namespace: ` + namespace + `
+---
+kind: ClusterRole
+apiVersion: rbac.authorization.k8s.io/v1beta1
+metadata:
+  name: rook-ceph-object-bucket
+  labels:
+    operator: rook
+    storage-backend: ceph
+    rbac.ceph.rook.io/aggregate-to-rook-ceph-mgr-cluster: "true"
+rules:
+- apiGroups:
+  - ""
+  verbs:
+  - "*"
+  resources:
+  - secrets
+  - configmaps
+- apiGroups:
+    - storage.k8s.io
+  resources:
+    - storageclasses
+  verbs:
+    - get
+    - list
+    - watch
+- apiGroups:
+  - "objectbucket.io"
+  verbs:
+  - "*"
+  resources:
+  - "*"
 `
 }
 
@@ -1514,4 +1803,33 @@ metadata:
 spec:
   displayName: ` + displayName + `
   store: ` + store
+}
+
+//GetBucketStorageClass returns the manifest to create object bucket
+func (m *CephManifestsMaster) GetBucketStorageClass(storeNameSpace string, storeName string, storageClassName string, reclaimPolicy string, region string) string {
+	return `apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+   name: ` + storageClassName + `
+provisioner: ceph.rook.io/bucket
+reclaimPolicy: ` + reclaimPolicy + `
+parameters:
+    objectStoreName: ` + storeName + `
+    objectStoreNamespace: ` + storeNameSpace + `
+    region: ` + region
+}
+
+//GetObc returns the manifest to create object bucket claim
+func (m *CephManifestsMaster) GetObc(claimName string, storageClassName string, objectBucketName string, varBucketName bool) string {
+	bucketParameter := "generateBucketName"
+	if varBucketName {
+		bucketParameter = "bucketName"
+	}
+	return `apiVersion: objectbucket.io/v1alpha1
+kind: ObjectBucketClaim
+metadata:
+  name: ` + claimName + `
+spec:
+  ` + bucketParameter + `: ` + objectBucketName + `
+  storageClassName: ` + storageClassName
 }

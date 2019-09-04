@@ -22,10 +22,11 @@ import (
 	cassandrav1alpha1 "github.com/rook/rook/pkg/client/clientset/versioned/typed/cassandra.rook.io/v1alpha1"
 	cephv1 "github.com/rook/rook/pkg/client/clientset/versioned/typed/ceph.rook.io/v1"
 	cockroachdbv1alpha1 "github.com/rook/rook/pkg/client/clientset/versioned/typed/cockroachdb.rook.io/v1alpha1"
-	edgefsv1beta1 "github.com/rook/rook/pkg/client/clientset/versioned/typed/edgefs.rook.io/v1beta1"
+	edgefsv1 "github.com/rook/rook/pkg/client/clientset/versioned/typed/edgefs.rook.io/v1"
 	miniov1alpha1 "github.com/rook/rook/pkg/client/clientset/versioned/typed/minio.rook.io/v1alpha1"
 	nfsv1alpha1 "github.com/rook/rook/pkg/client/clientset/versioned/typed/nfs.rook.io/v1alpha1"
 	rookv1alpha2 "github.com/rook/rook/pkg/client/clientset/versioned/typed/rook.io/v1alpha2"
+	yugabytedbv1alpha1 "github.com/rook/rook/pkg/client/clientset/versioned/typed/yugabytedb.rook.io/v1alpha1"
 	discovery "k8s.io/client-go/discovery"
 	rest "k8s.io/client-go/rest"
 	flowcontrol "k8s.io/client-go/util/flowcontrol"
@@ -36,10 +37,11 @@ type Interface interface {
 	CassandraV1alpha1() cassandrav1alpha1.CassandraV1alpha1Interface
 	CephV1() cephv1.CephV1Interface
 	CockroachdbV1alpha1() cockroachdbv1alpha1.CockroachdbV1alpha1Interface
-	EdgefsV1beta1() edgefsv1beta1.EdgefsV1beta1Interface
+	EdgefsV1() edgefsv1.EdgefsV1Interface
 	MinioV1alpha1() miniov1alpha1.MinioV1alpha1Interface
 	NfsV1alpha1() nfsv1alpha1.NfsV1alpha1Interface
 	RookV1alpha2() rookv1alpha2.RookV1alpha2Interface
+	YugabytedbV1alpha1() yugabytedbv1alpha1.YugabytedbV1alpha1Interface
 }
 
 // Clientset contains the clients for groups. Each group has exactly one
@@ -49,10 +51,11 @@ type Clientset struct {
 	cassandraV1alpha1   *cassandrav1alpha1.CassandraV1alpha1Client
 	cephV1              *cephv1.CephV1Client
 	cockroachdbV1alpha1 *cockroachdbv1alpha1.CockroachdbV1alpha1Client
-	edgefsV1beta1       *edgefsv1beta1.EdgefsV1beta1Client
+	edgefsV1            *edgefsv1.EdgefsV1Client
 	minioV1alpha1       *miniov1alpha1.MinioV1alpha1Client
 	nfsV1alpha1         *nfsv1alpha1.NfsV1alpha1Client
 	rookV1alpha2        *rookv1alpha2.RookV1alpha2Client
+	yugabytedbV1alpha1  *yugabytedbv1alpha1.YugabytedbV1alpha1Client
 }
 
 // CassandraV1alpha1 retrieves the CassandraV1alpha1Client
@@ -70,9 +73,9 @@ func (c *Clientset) CockroachdbV1alpha1() cockroachdbv1alpha1.CockroachdbV1alpha
 	return c.cockroachdbV1alpha1
 }
 
-// EdgefsV1beta1 retrieves the EdgefsV1beta1Client
-func (c *Clientset) EdgefsV1beta1() edgefsv1beta1.EdgefsV1beta1Interface {
-	return c.edgefsV1beta1
+// EdgefsV1 retrieves the EdgefsV1Client
+func (c *Clientset) EdgefsV1() edgefsv1.EdgefsV1Interface {
+	return c.edgefsV1
 }
 
 // MinioV1alpha1 retrieves the MinioV1alpha1Client
@@ -88,6 +91,11 @@ func (c *Clientset) NfsV1alpha1() nfsv1alpha1.NfsV1alpha1Interface {
 // RookV1alpha2 retrieves the RookV1alpha2Client
 func (c *Clientset) RookV1alpha2() rookv1alpha2.RookV1alpha2Interface {
 	return c.rookV1alpha2
+}
+
+// YugabytedbV1alpha1 retrieves the YugabytedbV1alpha1Client
+func (c *Clientset) YugabytedbV1alpha1() yugabytedbv1alpha1.YugabytedbV1alpha1Interface {
+	return c.yugabytedbV1alpha1
 }
 
 // Discovery retrieves the DiscoveryClient
@@ -118,7 +126,7 @@ func NewForConfig(c *rest.Config) (*Clientset, error) {
 	if err != nil {
 		return nil, err
 	}
-	cs.edgefsV1beta1, err = edgefsv1beta1.NewForConfig(&configShallowCopy)
+	cs.edgefsV1, err = edgefsv1.NewForConfig(&configShallowCopy)
 	if err != nil {
 		return nil, err
 	}
@@ -131,6 +139,10 @@ func NewForConfig(c *rest.Config) (*Clientset, error) {
 		return nil, err
 	}
 	cs.rookV1alpha2, err = rookv1alpha2.NewForConfig(&configShallowCopy)
+	if err != nil {
+		return nil, err
+	}
+	cs.yugabytedbV1alpha1, err = yugabytedbv1alpha1.NewForConfig(&configShallowCopy)
 	if err != nil {
 		return nil, err
 	}
@@ -149,10 +161,11 @@ func NewForConfigOrDie(c *rest.Config) *Clientset {
 	cs.cassandraV1alpha1 = cassandrav1alpha1.NewForConfigOrDie(c)
 	cs.cephV1 = cephv1.NewForConfigOrDie(c)
 	cs.cockroachdbV1alpha1 = cockroachdbv1alpha1.NewForConfigOrDie(c)
-	cs.edgefsV1beta1 = edgefsv1beta1.NewForConfigOrDie(c)
+	cs.edgefsV1 = edgefsv1.NewForConfigOrDie(c)
 	cs.minioV1alpha1 = miniov1alpha1.NewForConfigOrDie(c)
 	cs.nfsV1alpha1 = nfsv1alpha1.NewForConfigOrDie(c)
 	cs.rookV1alpha2 = rookv1alpha2.NewForConfigOrDie(c)
+	cs.yugabytedbV1alpha1 = yugabytedbv1alpha1.NewForConfigOrDie(c)
 
 	cs.DiscoveryClient = discovery.NewDiscoveryClientForConfigOrDie(c)
 	return &cs
@@ -164,10 +177,11 @@ func New(c rest.Interface) *Clientset {
 	cs.cassandraV1alpha1 = cassandrav1alpha1.New(c)
 	cs.cephV1 = cephv1.New(c)
 	cs.cockroachdbV1alpha1 = cockroachdbv1alpha1.New(c)
-	cs.edgefsV1beta1 = edgefsv1beta1.New(c)
+	cs.edgefsV1 = edgefsv1.New(c)
 	cs.minioV1alpha1 = miniov1alpha1.New(c)
 	cs.nfsV1alpha1 = nfsv1alpha1.New(c)
 	cs.rookV1alpha2 = rookv1alpha2.New(c)
+	cs.yugabytedbV1alpha1 = yugabytedbv1alpha1.New(c)
 
 	cs.DiscoveryClient = discovery.NewDiscoveryClient(c)
 	return &cs

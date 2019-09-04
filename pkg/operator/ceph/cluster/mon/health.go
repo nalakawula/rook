@@ -24,11 +24,9 @@ import (
 	"github.com/rook/rook/pkg/clusterd"
 	"github.com/rook/rook/pkg/daemon/ceph/client"
 	cephconfig "github.com/rook/rook/pkg/daemon/ceph/config"
-	"github.com/rook/rook/pkg/operator/k8sutil"
-	v1 "k8s.io/api/core/v1"
+	cephutil "github.com/rook/rook/pkg/daemon/ceph/util"
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	scheduler "k8s.io/kubernetes/pkg/scheduler/api"
 )
 
 var (
@@ -40,18 +38,25 @@ var (
 
 // HealthChecker aggregates the mon/cluster info needed to check the health of the monitors
 type HealthChecker struct {
-	monCluster *Cluster
+	monCluster  *Cluster
+	clusterSpec *cephv1.ClusterSpec
 }
 
 // NewHealthChecker creates a new HealthChecker object
-func NewHealthChecker(monCluster *Cluster) *HealthChecker {
+func NewHealthChecker(monCluster *Cluster, clusterSpec *cephv1.ClusterSpec) *HealthChecker {
 	return &HealthChecker{
-		monCluster: monCluster,
+		monCluster:  monCluster,
+		clusterSpec: clusterSpec,
 	}
 }
 
 // Check periodically checks the health of the monitors
 func (hc *HealthChecker) Check(stopCh chan struct{}) {
+	// Populate spec with clusterSpec
+	if hc.clusterSpec.External.Enable {
+		hc.monCluster.spec = *hc.clusterSpec
+	}
+
 	for {
 		select {
 		case <-stopCh:
@@ -62,7 +67,7 @@ func (hc *HealthChecker) Check(stopCh chan struct{}) {
 			logger.Debugf("checking health of mons")
 			err := hc.monCluster.checkHealth()
 			if err != nil {
-				logger.Infof("failed to check mon health. %+v", err)
+				logger.Warningf("failed to check mon health. %+v", err)
 			}
 		}
 	}
@@ -72,27 +77,27 @@ func (c *Cluster) checkHealth() error {
 	c.acquireOrchestrationLock()
 	defer c.releaseOrchestrationLock()
 
-	logger.Debugf("Checking health for mons in cluster. %s", c.clusterInfo.Name)
-
-	// Use a local mon count in case the user updates the crd in another goroutine.
-	// We need to complete a health check with a consistent value.
-	desiredMonCount, msg, err := c.getTargetMonCount()
-	if err != nil {
-		return fmt.Errorf("failed to get target mon count. %+v", err)
-	}
-	logger.Debugf(msg)
+	logger.Debugf("Checking health for mons in cluster. %s", c.ClusterInfo.Name)
 
 	// connect to the mons
 	// get the status and check for quorum
-	status, err := client.GetMonStatus(c.context, c.clusterInfo.Name, true)
+	status, err := client.GetMonStatus(c.context, c.ClusterInfo.Name, true)
 	if err != nil {
 		return fmt.Errorf("failed to get mon status. %+v", err)
 	}
 	logger.Debugf("Mon status: %+v", status)
+	if c.spec.External.Enable {
+		return c.handleExternalMonStatus(status)
+	}
+
+	// Use a local mon count in case the user updates the crd in another goroutine.
+	// We need to complete a health check with a consistent value.
+	desiredMonCount := c.spec.Mon.Count
+	logger.Debugf("targeting the mon count %d", desiredMonCount)
 
 	// Source of truth of which mons should exist is our *clusterInfo*
 	monsNotFound := map[string]interface{}{}
-	for _, mon := range c.clusterInfo.Monitors {
+	for _, mon := range c.ClusterInfo.Monitors {
 		monsNotFound[mon.Name] = struct{}{}
 	}
 
@@ -156,16 +161,9 @@ func (c *Cluster) checkHealth() error {
 	// handle all mons that haven't been in the Ceph mon map
 	for mon := range monsNotFound {
 		logger.Warningf("mon %s NOT found in ceph mon map, failover", mon)
-		c.failMon(len(c.clusterInfo.Monitors), desiredMonCount, mon)
+		c.failMon(len(c.ClusterInfo.Monitors), desiredMonCount, mon)
 		// only deal with one "not found in ceph mon map" mon per health check
 		return nil
-	}
-
-	// find any mons that invalidate our placement policy, and if necessary,
-	// reschedule them to other nodes.
-	done, err := c.resolveInvalidMonitorPlacement(desiredMonCount)
-	if done || err != nil {
-		return err
 	}
 
 	// create/start new mons when there are fewer mons than the desired count in the CRD
@@ -209,32 +207,31 @@ func (c *Cluster) failoverMon(name string) error {
 	m := c.newMonConfig(c.maxMonID + 1)
 	logger.Infof("starting new mon: %+v", m)
 
-	// Create the service endpoint
-	serviceIP, err := c.createService(m)
-	if err != nil {
-		return fmt.Errorf("failed to create mon service. %+v", err)
-	}
-
 	mConf := []*monConfig{m}
 
 	// Assign the pod to a node
-	if err = c.assignMons(mConf); err != nil {
+	if err := c.assignMons(mConf); err != nil {
 		return fmt.Errorf("failed to place new mon on a node. %+v", err)
 	}
 
-	if c.HostNetwork {
+	if c.Network.IsHost() {
 		node, ok := c.mapping.Node[m.DaemonName]
 		if !ok {
 			return fmt.Errorf("mon %s doesn't exist in assignment map", m.DaemonName)
 		}
 		m.PublicIP = node.Address
 	} else {
+		// Create the service endpoint
+		serviceIP, err := c.createService(m)
+		if err != nil {
+			return fmt.Errorf("failed to create mon service. %+v", err)
+		}
 		m.PublicIP = serviceIP
 	}
-	c.clusterInfo.Monitors[m.DaemonName] = cephconfig.NewMonInfo(m.DaemonName, m.PublicIP, m.Port)
+	c.ClusterInfo.Monitors[m.DaemonName] = cephconfig.NewMonInfo(m.DaemonName, m.PublicIP, m.Port)
 
 	// Start the deployment
-	if err = c.startDeployments(mConf, true); err != nil {
+	if err := c.startDeployments(mConf, true); err != nil {
 		return fmt.Errorf("failed to start new mon %s. %+v", m.DaemonName, err)
 	}
 
@@ -262,25 +259,13 @@ func (c *Cluster) removeMon(daemonName string) error {
 	}
 
 	// Remove the bad monitor from quorum
-	if err := removeMonitorFromQuorum(c.context, c.clusterInfo.Name, daemonName); err != nil {
+	if err := removeMonitorFromQuorum(c.context, c.ClusterInfo.Name, daemonName); err != nil {
 		return fmt.Errorf("failed to remove mon %s from quorum. %+v", daemonName, err)
 	}
-	delete(c.clusterInfo.Monitors, daemonName)
+	delete(c.ClusterInfo.Monitors, daemonName)
 	// check if a mapping exists for the mon
 	if _, ok := c.mapping.Node[daemonName]; ok {
-		nodeName := c.mapping.Node[daemonName].Name
 		delete(c.mapping.Node, daemonName)
-		// if node->port "mapping" has been created, decrease or delete it
-		if port, ok := c.mapping.Port[nodeName]; ok {
-			if port == DefaultMsgr1Port {
-				delete(c.mapping.Port, nodeName)
-			}
-			// don't clean up if a node port is higher than the default port, other
-			// mons could be on the same node with > DefaultPort ports, decreasing could
-			// cause port collisions
-			// This can be solved by using a map[nodeName][]int32 for the ports to
-			// even better check which ports are open for the HostNetwork mode
-		}
 	}
 
 	// Remove the service endpoint
@@ -294,11 +279,6 @@ func (c *Cluster) removeMon(daemonName string) error {
 
 	if err := c.saveMonConfig(); err != nil {
 		return fmt.Errorf("failed to save mon config after failing over mon %s. %+v", daemonName, err)
-	}
-
-	// make sure to rewrite the config so NO new connections are made to the removed mon
-	if err := WriteConnectionConfig(c.context, c.clusterInfo); err != nil {
-		return fmt.Errorf("failed to write connection config after failing over mon %s. %+v", daemonName, err)
 	}
 
 	return nil
@@ -315,147 +295,135 @@ func removeMonitorFromQuorum(context *clusterd.Context, clusterName, name string
 	return nil
 }
 
-func (c *Cluster) resolveInvalidMonitorPlacement(desiredMonCount int) (bool, error) {
-	nodeChoice, err := c.findInvalidMonitorPlacement(desiredMonCount)
+func (c *Cluster) handleExternalMonStatus(status client.MonStatusResponse) error {
+
+	changed, err := c.addOrRemoveExternalMonitor(status)
 	if err != nil {
-		return true, fmt.Errorf("failed to find invalid mon placement %+v", err)
+		return fmt.Errorf("failed to add or remove external mon. %+v", err)
 	}
 
-	// no violation found
-	if nodeChoice == nil {
-		return false, nil
-	}
-
-	for name, nodeInfo := range c.mapping.Node {
-		if nodeInfo.Name == nodeChoice.Node.Name {
-			logger.Infof("rebalance: rescheduling mon %s from node %s", name, nodeInfo.Name)
-			c.failMon(len(c.clusterInfo.Monitors), desiredMonCount, name)
-			return true, nil
+	// let's save the monitor's config if anything happened
+	if changed {
+		if err := c.saveMonConfig(); err != nil {
+			return fmt.Errorf("failed to save mon config after adding/removing external mon. %+v", err)
 		}
 	}
 
-	logger.Warningf("rebalance: no mon pod found on node %s", nodeChoice.Node.Name)
-
-	return false, nil
+	return nil
 }
 
-func (c *Cluster) findInvalidMonitorPlacement(desiredMonCount int) (*NodeUsage, error) {
-	nodeZones, err := c.getNodeMonUsage()
-	if err != nil {
-		return nil, fmt.Errorf("failed to get node monitor usage. %+v", err)
+func (c *Cluster) addOrRemoveExternalMonitor(status client.MonStatusResponse) (bool, error) {
+	// func addOrRemoveExternalMonitor(status client.MonStatusResponse) (bool, error) {
+	var changed bool
+	// Populate a map with the current monitor from ClusterInfo
+	monsNotFound := map[string]interface{}{}
+	for _, mon := range c.ClusterInfo.Monitors {
+		monsNotFound[mon.Name] = struct{}{}
 	}
 
-	// compute two helpful global flags:
-	//  - does an empty zone exist
-	//  - does an empty node exist
-	emptyZone := false
-	emptyNode := false
-	for zi := range nodeZones {
-		monFoundInZone := false
-		for ni := range nodeZones[zi] {
-			nodeUsage := &nodeZones[zi][ni]
-			if nodeUsage.MonCount > 0 {
-				monFoundInZone = true
-			} else if nodeUsage.MonValid {
-				// only consider valid nodes since this flag determines if a mon
-				// may be scheduled on to a new node.
-				emptyNode = true
-			}
-		}
-		if !monFoundInZone {
-			// emptyZone is used below to imply that an empty zone exists AND
-			// that zone contains a valid node (i.e. a node that new pods can be
-			// assigned). this check enforces that assumption by checking that
-			// the zone contains at least one valid node.
-			validNodeInZone := false
-			for _, nodeUsage := range nodeZones[zi] {
-				if nodeUsage.MonValid {
-					validNodeInZone = true
-					break
-				}
-			}
-			if validNodeInZone {
-				emptyZone = true
-			}
-			logger.Debugf("rebalance: empty zone found. validNodeInZone: %t, emptyZone %t",
-				validNodeInZone, emptyZone)
-		}
-	}
-
-	logger.Debugf("rebalance: desired mon count: %d, empty zone found: %t, empty node found: %t",
-		desiredMonCount, emptyZone, emptyNode)
-
-	for zi := range nodeZones {
-		zoneMonCount := 0
-		var nodeChoice *NodeUsage
-
-		// for each node consider two cases: too many monitors are running on a
-		// node, or monitors are running on invalid nodes.
-		for ni := range nodeZones[zi] {
-			nodeUsage := &nodeZones[zi][ni]
-			zoneMonCount += nodeUsage.MonCount
-
-			// if this node has too many monitors, and an underused node exists,
-			// then consider moving the monitor. note that this check is
-			// independent of the setting `AllowMultiplePerNode` since we also
-			// want to avoid in general keeping multiple monitors on one node.
-			if nodeUsage.MonCount > 1 && emptyNode {
-				logger.Infof("rebalance: chose overloaded node %s with %d mons",
-					nodeUsage.Node.Name, nodeUsage.MonCount)
-				nodeChoice = nodeUsage
-				break
-			}
-
-			// check for mons on invalid nodes. but reschedule pod only when it
-			// is invalid for reasons other than schedulability which should not
-			// affect pods that are already scheduled.
-			if nodeUsage.MonCount > 0 && !nodeUsage.MonValid {
-				placement := cephv1.GetMonPlacement(c.spec.Placement)
-				placement.Tolerations = append(placement.Tolerations,
-					v1.Toleration{
-						Key:      scheduler.TaintNodeUnschedulable,
-						Effect:   "",
-						Operator: v1.TolerationOpExists,
-					})
-				valid, err := k8sutil.ValidNodeNoSched(*nodeUsage.Node, placement)
-				if err != nil {
-					logger.Warningf("rebalance: failed to validate node %s %+v",
-						nodeUsage.Node.Name, err)
-				} else if !valid {
-					logger.Infof("rebalance: chose invalid node %s",
-						nodeUsage.Node.Name)
-					nodeChoice = nodeUsage
-					break
-				}
-			}
-		}
-
-		// if we didn't already select a node with a monitor for rescheduling,
-		// then consider that a zone may be overloaded and can be rebalanced.
-		// this case occurs if the zone has more than 1 monitor, and some other
-		// zone exists without any monitors.
-		if nodeChoice == nil && zoneMonCount > 1 && emptyZone {
-			for ni := range nodeZones[zi] {
-				nodeUsage := &nodeZones[zi][ni]
-				if nodeUsage.MonCount > 0 {
-					// select the node with the most monitors assigned
-					if nodeChoice == nil || nodeUsage.MonCount > nodeChoice.MonCount {
-						nodeChoice = nodeUsage
+	// Iterate over the mons first and compare it with ClusterInfo
+	for _, mon := range status.MonMap.Mons {
+		inQuorum := monInQuorum(mon, status.Quorum)
+		// if the mon is not in clusterInfo
+		if _, ok := monsNotFound[mon.Name]; !ok {
+			// If the mon is part of the quorum
+			if inQuorum {
+				// let's add it to ClusterInfo
+				// Always pick the v1 endpoint, that's the easier thing to do since some people might not have activated msgr2
+				// We must run on at least Nautilus so we are 100% certain that will have a field mon.PublicAddrs.Addrvec with 'v1' in it
+				var endpoint string
+				for i := range mon.PublicAddrs.Addrvec {
+					if mon.PublicAddrs.Addrvec[i].Type == "v1" {
+						endpoint = mon.PublicAddrs.Addrvec[i].Addr
 					}
 				}
+				// find IP and Port of that Mon
+				monIP := cephutil.GetIPFromEndpoint(endpoint)
+				monPort := cephutil.GetPortFromEndpoint(endpoint)
+				logger.Infof("new external mon %s found: %s, adding it", mon.Name, endpoint)
+				c.ClusterInfo.Monitors[mon.Name] = cephconfig.NewMonInfo(mon.Name, monIP, monPort)
+				changed = true
 			}
-			if nodeChoice != nil {
-				logger.Infof("rebalance: chose node %s from overloaded zone",
-					nodeChoice.Node.Name)
+			logger.Debugf("mon %s is not in quorum and not in ClusterInfo", mon.Name)
+		} else {
+			// mon is in ClusterInfo
+			logger.Debugf("mon %s is in ClusterInfo, let's test if it's in quorum", mon.Name)
+			if !inQuorum {
+				// this mon was in clusterInfo but not part of the quorum anymore
+				// let's remove it from ClusterInfo
+				logger.Infof("monitor %s is not part of the external cluster monitor quorum, removing it", mon.Name)
+				delete(c.ClusterInfo.Monitors, mon.Name)
+				changed = true
 			}
 		}
+		logger.Debugf("everything is fine mon %s in the clusterInfo and its quorum status is %v", mon.Name, inQuorum)
+	}
 
-		if nodeChoice != nil {
-			return nodeChoice, nil
+	// Let's do a new iteration, over ClusterInfo this time to catch mon that might have disappeared
+	for _, mon := range c.ClusterInfo.Monitors {
+		// if the mon does not exist in the monmap
+		monInMonMap := isMonInMonMap(mon.Name, status.MonMap.Mons)
+		if !monInMonMap {
+			// mon is in clusterInfo but not part of the quorum removing it
+			logger.Infof("monitor %s disappeared from the external cluster monitor map, removing it", mon.Name)
+			delete(c.ClusterInfo.Monitors, mon.Name)
+			changed = true
+		} else {
+			// it's in the mon map but is it part of the quorum?
+			logger.Debug("need to check is the mon not in ClusterInfo is part of a quorum or not")
+			monInQuorum := isMonInQuorum(mon.Name, status.MonMap.Mons, status.Quorum)
+			if !monInQuorum {
+				logger.Infof("external mon %s in the mon map but not in quorum, removing it", mon.Name)
+				delete(c.ClusterInfo.Monitors, mon.Name)
+				changed = true
+			}
+		}
+		logger.Debugf("mon %s endpoint is %s", mon.Name, mon.Endpoint)
+	}
+
+	logger.Debugf("ClusterInfo.Monitors is %+v", c.ClusterInfo.Monitors)
+	return changed, nil
+}
+
+func isMonInMonMap(monToTest string, Mons []client.MonMapEntry) bool {
+	for _, m := range Mons {
+		if m.Name == monToTest {
+			logger.Debugf("mon %s is in the monmap!", monToTest)
+			return true
 		}
 	}
 
-	logger.Debugf("rebalance: no mon placement violations or fixes available")
+	return false
+}
 
-	return nil, nil
+func isMonInQuorum(monToTest string, Mons []client.MonMapEntry, quorum []int) bool {
+	monRank := getMonRank(monToTest, Mons)
+	if monRank == -1 {
+		// this is an error, we can't find the rank
+		// so we just return false and the mon will get deleted
+		logger.Debugf("mon %s rank is %d", monToTest, monRank)
+		return false
+	}
+
+	for _, rank := range quorum {
+		logger.Debugf("rank is %d, monRank is %d", rank, monRank)
+		if rank == monRank {
+			logger.Debugf("mon %s is part of the quorum", monToTest)
+			return true
+		}
+	}
+
+	logger.Debugf("could not find the rank %d for %s", monRank, monToTest)
+	return false
+}
+
+func getMonRank(monToTest string, Mons []client.MonMapEntry) int {
+	for _, m := range Mons {
+		if m.Name == monToTest {
+			logger.Debugf("mon rank is %d", m.Rank)
+			return m.Rank
+		}
+	}
+
+	return -1
 }

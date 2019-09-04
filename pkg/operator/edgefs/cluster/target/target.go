@@ -22,11 +22,11 @@ import (
 	"time"
 
 	"github.com/coreos/pkg/capnslog"
-	edgefsv1beta1 "github.com/rook/rook/pkg/apis/edgefs.rook.io/v1beta1"
+	edgefsv1 "github.com/rook/rook/pkg/apis/edgefs.rook.io/v1"
 	rookalpha "github.com/rook/rook/pkg/apis/rook.io/v1alpha2"
 	"github.com/rook/rook/pkg/clusterd"
 	appsv1 "k8s.io/api/apps/v1"
-	"k8s.io/api/core/v1"
+	v1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -55,14 +55,14 @@ type Cluster struct {
 	Storage          rookalpha.StorageScopeSpec
 	dataDirHostPath  string
 	dataVolumeSize   resource.Quantity
-	HostNetworkSpec  edgefsv1beta1.NetworkSpec
+	NetworkSpec      rookalpha.NetworkSpec
 	Privileged       bool
 	resources        v1.ResourceRequirements
 	resourceProfile  string
 	chunkCacheSize   resource.Quantity
 	ownerRef         metav1.OwnerReference
 	serviceAccount   string
-	deploymentConfig edgefsv1beta1.ClusterDeploymentConfig
+	deploymentConfig edgefsv1.ClusterDeploymentConfig
 	useHostLocalTime bool
 }
 
@@ -77,12 +77,12 @@ func New(
 	dataVolumeSize resource.Quantity,
 	annotations rookalpha.Annotations,
 	placement rookalpha.Placement,
-	hostNetworkSpec edgefsv1beta1.NetworkSpec,
+	NetworkSpec rookalpha.NetworkSpec,
 	resources v1.ResourceRequirements,
 	resourceProfile string,
 	chunkCacheSize resource.Quantity,
 	ownerRef metav1.OwnerReference,
-	deploymentConfig edgefsv1beta1.ClusterDeploymentConfig,
+	deploymentConfig edgefsv1.ClusterDeploymentConfig,
 	useHostLocalTime bool,
 ) *Cluster {
 
@@ -101,8 +101,8 @@ func New(
 		Storage:          storageSpec,
 		dataDirHostPath:  dataDirHostPath,
 		dataVolumeSize:   dataVolumeSize,
-		HostNetworkSpec:  hostNetworkSpec,
-		Privileged:       (isHostNetworkDefined(hostNetworkSpec) || os.Getenv("ROOK_HOSTPATH_REQUIRES_PRIVILEGED") == "true"),
+		NetworkSpec:      NetworkSpec,
+		Privileged:       (NetworkSpec.IsHost() || os.Getenv("ROOK_HOSTPATH_REQUIRES_PRIVILEGED") == "true"),
 		resources:        resources,
 		resourceProfile:  resourceProfile,
 		chunkCacheSize:   chunkCacheSize,
@@ -113,7 +113,7 @@ func New(
 }
 
 // Start the target management
-func (c *Cluster) Start(rookImage string, nodes []rookalpha.Node, dro edgefsv1beta1.DevicesResurrectOptions) (err error) {
+func (c *Cluster) Start(rookImage string, nodes []rookalpha.Node, dro edgefsv1.DevicesResurrectOptions) (err error) {
 	logger.Infof("start running targets in namespace %s", c.Namespace)
 
 	logger.Infof("Target Image is %s", rookImage)

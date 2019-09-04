@@ -19,10 +19,10 @@ package cluster
 import (
 	"encoding/json"
 
-	edgefsv1beta1 "github.com/rook/rook/pkg/apis/edgefs.rook.io/v1beta1"
+	edgefsv1 "github.com/rook/rook/pkg/apis/edgefs.rook.io/v1"
 	"github.com/rook/rook/pkg/operator/edgefs/cluster/target"
 	"github.com/rook/rook/pkg/operator/k8sutil"
-	"k8s.io/api/core/v1"
+	v1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
@@ -37,9 +37,9 @@ const (
 // As we relying on StatefulSet, we want to build global ConfigMap shared
 // to all the nodes in the cluster. This way configuration is simplified and
 // available to all subcomponents at any point it time.
-func (c *cluster) createClusterConfigMap(deploymentConfig edgefsv1beta1.ClusterDeploymentConfig, resurrect bool) error {
+func (c *cluster) createClusterConfigMap(deploymentConfig edgefsv1.ClusterDeploymentConfig, resurrect bool) error {
 
-	cm := make(map[string]edgefsv1beta1.SetupNode)
+	cm := make(map[string]edgefsv1.SetupNode)
 
 	dnsRecords := make([]string, len(deploymentConfig.DevConfig))
 	for i := 0; i < len(deploymentConfig.DevConfig); i++ {
@@ -48,17 +48,47 @@ func (c *cluster) createClusterConfigMap(deploymentConfig edgefsv1beta1.ClusterD
 
 	serverIfName := defaultServerIfName
 	brokerIfName := defaultBrokerIfName
-	if isHostNetworkDefined(c.Spec.Network) {
 
-		if len(c.Spec.Network.ServerIfName) > 0 && len(c.Spec.Network.BrokerIfName) > 0 {
-			serverIfName = c.Spec.Network.ServerIfName
-			brokerIfName = c.Spec.Network.BrokerIfName
-		} else if len(c.Spec.Network.ServerIfName) > 0 {
-			serverIfName = c.Spec.Network.ServerIfName
-			brokerIfName = c.Spec.Network.ServerIfName
-		} else if len(c.Spec.Network.BrokerIfName) > 0 {
-			serverIfName = c.Spec.Network.BrokerIfName
-			brokerIfName = c.Spec.Network.BrokerIfName
+	serverSelector, serverDefined := c.Spec.Network.Selectors["server"]
+	brokerSelector, brokerDefined := c.Spec.Network.Selectors["broker"]
+
+	if c.Spec.Network.IsHost() {
+		if serverDefined && brokerDefined {
+			serverIfName = serverSelector
+			brokerIfName = brokerSelector
+		} else if serverDefined {
+			serverIfName = serverSelector
+			brokerIfName = serverSelector
+		} else if brokerDefined {
+			serverIfName = brokerSelector
+			brokerIfName = brokerSelector
+		}
+	} else if c.Spec.Network.IsMultus() {
+		if serverDefined && brokerDefined {
+			var err error
+			serverIfName, err = k8sutil.GetMultusIfName(serverSelector)
+			if err != nil {
+				return err
+			}
+
+			brokerIfName, err = k8sutil.GetMultusIfName(brokerSelector)
+			if err != nil {
+				return err
+			}
+		} else if serverDefined {
+			serverIfName, err := k8sutil.GetMultusIfName(serverSelector)
+			if err != nil {
+				return err
+			}
+
+			brokerIfName = serverIfName
+		} else if brokerDefined {
+			serverIfName, err := k8sutil.GetMultusIfName(brokerSelector)
+			if err != nil {
+				return err
+			}
+
+			brokerIfName = serverIfName
 		}
 	}
 
@@ -70,7 +100,7 @@ func (c *cluster) createClusterConfigMap(deploymentConfig edgefsv1beta1.ClusterD
 		rtlfsDevices := devConfig.Rtlfs.Devices
 
 		rtlfsAutoDetectPath := ""
-		if deploymentConfig.DeploymentType == edgefsv1beta1.DeploymentAutoRtlfs &&
+		if deploymentConfig.DeploymentType == edgefsv1.DeploymentAutoRtlfs &&
 			!devConfig.IsGatewayNode {
 			rtlfsAutoDetectPath = "/data"
 		}
@@ -86,9 +116,9 @@ func (c *cluster) createClusterConfigMap(deploymentConfig edgefsv1beta1.ClusterD
 			// same as before. Resurrection is "best effort" feature, we cannot
 			// guarnatee that cluster can be reconfigured, but at least we do try.
 
-			rtDevices = make([]edgefsv1beta1.RTDevice, 0)
-			rtSlaveDevices = make([]edgefsv1beta1.RTDevices, 0)
-			rtlfsDevices = make([]edgefsv1beta1.RtlfsDevice, 0)
+			rtDevices = make([]edgefsv1.RTDevice, 0)
+			rtSlaveDevices = make([]edgefsv1.RTDevices, 0)
+			rtlfsDevices = make([]edgefsv1.RtlfsDevice, 0)
 		}
 		// Set failureDomain to 2 if current node's zone > 0
 		failureDomain := 1
@@ -96,38 +126,38 @@ func (c *cluster) createClusterConfigMap(deploymentConfig edgefsv1beta1.ClusterD
 			failureDomain = 2
 		}
 
-		nodeConfig := edgefsv1beta1.SetupNode{
-			Ccow: edgefsv1beta1.CcowConf{
-				Trlog: edgefsv1beta1.CcowTrlog{
+		nodeConfig := edgefsv1.SetupNode{
+			Ccow: edgefsv1.CcowConf{
+				Trlog: edgefsv1.CcowTrlog{
 					Interval: defaultTrlogProcessingInterval,
 				},
-				Tenant: edgefsv1beta1.CcowTenant{
+				Tenant: edgefsv1.CcowTenant{
 					FailureDomain: failureDomain,
 				},
-				Network: edgefsv1beta1.CcowNetwork{
+				Network: edgefsv1.CcowNetwork{
 					BrokerInterfaces: brokerIfName,
 					ServerUnixSocket: "/opt/nedge/var/run/sock/ccowd.sock",
 				},
 			},
-			Ccowd: edgefsv1beta1.CcowdConf{
-				BgConfig: edgefsv1beta1.CcowdBgConfig{
+			Ccowd: edgefsv1.CcowdConf{
+				BgConfig: edgefsv1.CcowdBgConfig{
 					TrlogDeleteAfterHours: defaultTrlogKeepDays * 24,
 				},
 				Zone: devConfig.Zone,
-				Network: edgefsv1beta1.CcowdNetwork{
+				Network: edgefsv1.CcowdNetwork{
 					ServerInterfaces: serverIfName,
 					ServerUnixSocket: "/opt/nedge/var/run/sock/ccowd.sock",
 				},
 				Transport: []string{deploymentConfig.TransportKey},
 			},
-			Auditd: edgefsv1beta1.AuditdConf{
+			Auditd: edgefsv1.AuditdConf{
 				IsAggregator: 0,
 			},
-			Rtrd: edgefsv1beta1.RTDevices{
+			Rtrd: edgefsv1.RTDevices{
 				Devices: rtDevices,
 			},
 			RtrdSlaves: rtSlaveDevices,
-			Rtlfs: edgefsv1beta1.RtlfsDevices{
+			Rtlfs: edgefsv1.RtlfsDevices{
 				Devices: rtlfsDevices,
 			},
 			Ipv4Autodetect:  1,

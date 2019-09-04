@@ -43,6 +43,7 @@ import (
 	v1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/labels"
 )
 
 const (
@@ -55,7 +56,8 @@ const (
 	// MappingKey is the name of the mapping for the mon->node and node->port
 	MappingKey = "mapping"
 
-	appName           = "rook-ceph-mon"
+	// AppName is the name of the secret storing cluster mon.admin key, fsid and name
+	AppName           = "rook-ceph-mon"
 	monNodeAttr       = "mon_node"
 	monClusterAttr    = "mon_cluster"
 	tprName           = "mon.rook.io"
@@ -82,15 +84,23 @@ const (
 	// default storage request size for ceph monitor pvc
 	// https://docs.ceph.com/docs/master/start/hardware-recommendations/#monitors-and-managers-ceph-mon-and-ceph-mgr
 	cephMonDefaultStorageRequest = "10Gi"
+
+	// canary pod scheduling uses retry loops when cleaning up previous canary
+	// pods and waiting for kubernetes scheduling to complete.
+	canaryRetries           = 180
+	canaryRetryDelaySeconds = 5
 )
 
 var (
 	logger = capnslog.NewPackageLogger("github.com/rook/rook", "op-mon")
+
+	// hook for tests to override
+	scheduleMonitor = realScheduleMonitor
 )
 
 // Cluster represents the Rook and environment configuration settings needed to set up Ceph mons.
 type Cluster struct {
-	clusterInfo         *cephconfig.ClusterInfo
+	ClusterInfo         *cephconfig.ClusterInfo
 	context             *clusterd.Context
 	spec                cephv1.ClusterSpec
 	Namespace           string
@@ -98,7 +108,7 @@ type Cluster struct {
 	rookVersion         string
 	orchestrationMutex  sync.Mutex
 	Port                int32
-	HostNetwork         bool
+	Network             cephv1.NetworkSpec
 	maxMonID            int
 	waitForStart        bool
 	dataDirHostPath     string
@@ -108,6 +118,7 @@ type Cluster struct {
 	mapping             *Mapping
 	ownerRef            metav1.OwnerReference
 	csiConfigMutex      *sync.Mutex
+	isUpgrade           bool
 }
 
 // monConfig for a single monitor
@@ -128,7 +139,6 @@ type monConfig struct {
 // Mapping is mon node and port mapping
 type Mapping struct {
 	Node map[string]*NodeInfo `json:"node"`
-	Port map[string]int32     `json:"port"`
 }
 
 // NodeInfo contains name and address of a node
@@ -138,8 +148,14 @@ type NodeInfo struct {
 	Address  string
 }
 
+type SchedulingResult struct {
+	Node             *v1.Node
+	CanaryDeployment string
+	CanaryPVC        string
+}
+
 // New creates an instance of a mon cluster
-func New(context *clusterd.Context, namespace, dataDirHostPath string, hostNetwork bool, ownerRef metav1.OwnerReference, csiConfigMutex *sync.Mutex) *Cluster {
+func New(context *clusterd.Context, namespace, dataDirHostPath string, network cephv1.NetworkSpec, ownerRef metav1.OwnerReference, csiConfigMutex *sync.Mutex, isUpgrade bool) *Cluster {
 	return &Cluster{
 		context:             context,
 		dataDirHostPath:     dataDirHostPath,
@@ -149,30 +165,31 @@ func New(context *clusterd.Context, namespace, dataDirHostPath string, hostNetwo
 		monPodRetryInterval: 6 * time.Second,
 		monPodTimeout:       5 * time.Minute,
 		monTimeoutList:      map[string]time.Time{},
-		HostNetwork:         hostNetwork,
+		Network:             network,
 		mapping: &Mapping{
 			Node: map[string]*NodeInfo{},
-			Port: map[string]int32{},
 		},
 		ownerRef:       ownerRef,
 		csiConfigMutex: csiConfigMutex,
+		isUpgrade:      isUpgrade,
 	}
 }
 
 // Start begins the process of running a cluster of Ceph mons.
-func (c *Cluster) Start(clusterInfo *cephconfig.ClusterInfo, rookVersion string, cephVersion cephver.CephVersion, spec cephv1.ClusterSpec) (*cephconfig.ClusterInfo, error) {
+func (c *Cluster) Start(clusterInfo *cephconfig.ClusterInfo, rookVersion string, cephVersion cephver.CephVersion, spec cephv1.ClusterSpec, isUpgrade bool) (*cephconfig.ClusterInfo, error) {
 
 	// Only one goroutine can orchestrate the mons at a time
 	c.acquireOrchestrationLock()
 	defer c.releaseOrchestrationLock()
 
-	c.clusterInfo = clusterInfo
+	c.ClusterInfo = clusterInfo
 	c.rookVersion = rookVersion
 	c.spec = spec
+	c.isUpgrade = isUpgrade
 
 	// fail if we were instructed to deploy more than one mon on the same machine with host networking
-	if c.HostNetwork && c.spec.Mon.AllowMultiplePerNode && c.spec.Mon.Count > 1 {
-		return nil, fmt.Errorf("refusing to deploy %d monitors on the same host since hostNetwork is %v and allowMultiplePerNode is %v. Only one monitor per node is allowed", c.spec.Mon.Count, c.HostNetwork, c.spec.Mon.AllowMultiplePerNode)
+	if c.Network.IsHost() && c.spec.Mon.AllowMultiplePerNode && c.spec.Mon.Count > 1 {
+		return nil, fmt.Errorf("refusing to deploy %d monitors on the same host since hostNetwork is %v and allowMultiplePerNode is %v. Only one monitor per node is allowed", c.spec.Mon.Count, c.Network, c.spec.Mon.AllowMultiplePerNode)
 	}
 
 	// Validate pod's memory if specified
@@ -188,14 +205,10 @@ func (c *Cluster) Start(clusterInfo *cephconfig.ClusterInfo, rookVersion string,
 		return nil, fmt.Errorf("failed to initialize ceph cluster info. %+v", err)
 	}
 
-	targetCount, msg, err := c.getTargetMonCount()
-	if err != nil {
-		return nil, fmt.Errorf("failed to get target mon count. %+v", err)
-	}
-	logger.Infof(msg)
+	logger.Infof("targeting the mon count %d", c.spec.Mon.Count)
 
 	// create the mons for a new cluster or ensure mons are running in an existing cluster
-	return c.clusterInfo, c.startMons(targetCount)
+	return c.ClusterInfo, c.startMons(c.spec.Mon.Count)
 }
 
 func (c *Cluster) startMons(targetCount int) error {
@@ -207,11 +220,45 @@ func (c *Cluster) startMons(targetCount int) error {
 		return fmt.Errorf("failed to assign pods to mons. %+v", err)
 	}
 
+	// The centralized mon config database can only be used if there is at least one mon
+	// operational. If we are starting mons, and one is already up, then there is a cluster already
+	// created, and we can immediately set values in the config database. The goal is to set configs
+	// only once and do it as early as possible in the mon orchestration.
+	setConfigsNeedsRetry := false
+	if existingCount > 0 {
+		err := config.SetDefaultAndUserConfigs(c.context, c.Namespace, c.ClusterInfo, c.spec.ConfigOverrides)
+		if err != nil {
+			// If we fail here, it could be because the mons are not healthy, and this might be
+			// fixed by updating the mon deployments. Instead of returning error here, log a
+			// warning, and retry setting this later.
+			setConfigsNeedsRetry = true
+			logger.Warningf("failed to set Rook and/or user-defined Ceph config options before starting mons; will retry after starting mons. %+v", err)
+		}
+	}
+
 	if existingCount < len(mons) {
 		// Start the new mons one at a time
 		for i := existingCount; i < targetCount; i++ {
 			if err := c.ensureMonsRunning(mons, i, targetCount, true); err != nil {
 				return err
+			}
+
+			// If this is the first mon being created, we have to wait until it is created to set
+			// values in the config database. Do this only when the existing count is zero so that
+			// this is only done once when the cluster is created.
+			if existingCount == 0 {
+				err := config.SetDefaultAndUserConfigs(c.context, c.Namespace, c.ClusterInfo, c.spec.ConfigOverrides)
+				if err != nil {
+					return fmt.Errorf("failed to set Rook and/or user-defined Ceph config options after creating the first mon. %+v", err)
+				}
+			} else if setConfigsNeedsRetry && i == existingCount {
+				// Or if we need to retry, only do this when we are on the first iteration of the
+				// loop. This could be in the same if statement as above, but separate it to get a
+				// different error message.
+				err := config.SetDefaultAndUserConfigs(c.context, c.Namespace, c.ClusterInfo, c.spec.ConfigOverrides)
+				if err != nil {
+					return fmt.Errorf("failed to set Rook and/or user-defined Ceph config options after updating the existing mons. %+v", err)
+				}
 			}
 		}
 	} else {
@@ -220,16 +267,23 @@ func (c *Cluster) startMons(targetCount int) error {
 		if err := c.ensureMonsRunning(mons, lastMonIndex, targetCount, false); err != nil {
 			return err
 		}
+
+		if setConfigsNeedsRetry {
+			err := config.SetDefaultAndUserConfigs(c.context, c.Namespace, c.ClusterInfo, c.spec.ConfigOverrides)
+			if err != nil {
+				return fmt.Errorf("failed to set Rook and/or user-defined Ceph config options after forcefully updating the existing mons. %+v", err)
+			}
+		}
 	}
 
 	// Enable Ceph messenger 2 protocol on Nautilus
-	if c.clusterInfo.CephVersion.IsAtLeastNautilus() {
-		v, err := client.GetCephMonVersion(c.context, c.clusterInfo.Name)
+	if c.ClusterInfo.CephVersion.IsAtLeastNautilus() {
+		v, err := client.GetCephMonVersion(c.context, c.ClusterInfo.Name)
 		if err != nil {
 			return fmt.Errorf("failed to get ceph mon version. %+v", err)
 		}
 		if v.IsAtLeastNautilus() {
-			versions, err := client.GetAllCephDaemonVersions(c.context, c.clusterInfo.Name)
+			versions, err := client.GetAllCephDaemonVersions(c.context, c.ClusterInfo.Name)
 			if err != nil {
 				return fmt.Errorf("failed to get ceph daemons versions. %+v", err)
 			}
@@ -242,7 +296,7 @@ func (c *Cluster) startMons(targetCount int) error {
 		}
 	}
 
-	logger.Debugf("mon endpoints used are: %s", FlattenMonEndpoints(c.clusterInfo.Monitors))
+	logger.Debugf("mon endpoints used are: %s", FlattenMonEndpoints(c.ClusterInfo.Monitors))
 	return nil
 }
 
@@ -261,7 +315,7 @@ func (c *Cluster) ensureMonsRunning(mons []*monConfig, i, targetCount int, requi
 	// Calculate how many mons we expected to exist after this method is completed.
 	// If we are adding a new mon, we expect one more than currently exist.
 	// If we haven't created all the desired mons already, we will be adding a new one with this iteration
-	expectedMonCount := len(c.clusterInfo.Monitors)
+	expectedMonCount := len(c.ClusterInfo.Monitors)
 	if expectedMonCount < targetCount {
 		expectedMonCount++
 	}
@@ -277,7 +331,7 @@ func (c *Cluster) ensureMonsRunning(mons []*monConfig, i, targetCount int, requi
 	}
 
 	// make sure we have the connection info generated so connections can happen
-	if err := WriteConnectionConfig(c.context, c.clusterInfo); err != nil {
+	if err := WriteConnectionConfig(c.context, c.ClusterInfo); err != nil {
 		return err
 	}
 
@@ -295,11 +349,12 @@ func (c *Cluster) initClusterInfo(cephVersion cephver.CephVersion) error {
 	var err error
 
 	// get the cluster info from secret
-	c.clusterInfo, c.maxMonID, c.mapping, err = CreateOrLoadClusterInfo(c.context, c.Namespace, &c.ownerRef)
+	c.ClusterInfo, c.maxMonID, c.mapping, err = CreateOrLoadClusterInfo(c.context, c.Namespace, &c.ownerRef)
+	c.ClusterInfo.CephVersion = cephVersion
+
 	if err != nil {
 		return fmt.Errorf("failed to get cluster info. %+v", err)
 	}
-	c.clusterInfo.CephVersion = cephVersion
 
 	// save cluster monitor config
 	if err = c.saveMonConfig(); err != nil {
@@ -312,7 +367,7 @@ func (c *Cluster) initClusterInfo(cephVersion cephver.CephVersion) error {
 		return fmt.Errorf("failed to save mon keyring secret. %+v", err)
 	}
 	// also store the admin keyring for other daemons that might need it during init
-	if err := k.Admin().CreateOrUpdate(c.clusterInfo); err != nil {
+	if err := k.Admin().CreateOrUpdate(c.ClusterInfo); err != nil {
 		return fmt.Errorf("failed to save admin keyring secret. %+v", err)
 	}
 
@@ -323,7 +378,7 @@ func (c *Cluster) initMonConfig(size int) (int, []*monConfig) {
 	mons := []*monConfig{}
 
 	// initialize the mon pod info for mons that have been previously created
-	for _, monitor := range c.clusterInfo.Monitors {
+	for _, monitor := range c.ClusterInfo.Monitors {
 		mons = append(mons, &monConfig{
 			ResourceName: resourceName(monitor.Name),
 			DaemonName:   monitor.Name,
@@ -334,8 +389,8 @@ func (c *Cluster) initMonConfig(size int) (int, []*monConfig) {
 	}
 
 	// initialize mon info if we don't have enough mons (at first startup)
-	existingCount := len(c.clusterInfo.Monitors)
-	for i := len(c.clusterInfo.Monitors); i < size; i++ {
+	existingCount := len(c.ClusterInfo.Monitors)
+	for i := len(c.ClusterInfo.Monitors); i < size; i++ {
 		c.maxMonID++
 		mons = append(mons, c.newMonConfig(c.maxMonID))
 	}
@@ -357,15 +412,145 @@ func (c *Cluster) newMonConfig(monID int) *monConfig {
 
 // resourceName ensures the mon name has the rook-ceph-mon prefix
 func resourceName(name string) string {
-	if strings.HasPrefix(name, appName) {
+	if strings.HasPrefix(name, AppName) {
 		return name
 	}
-	return fmt.Sprintf("%s-%s", appName, name)
+	return fmt.Sprintf("%s-%s", AppName, name)
+}
+
+// scheduleMonitor selects a node for a monitor deployment.
+// see startMon() and design/ceph-mon-pv.md for additional details.
+func realScheduleMonitor(c *Cluster, mon *monConfig) (SchedulingResult, error) {
+	// target node decision, and deployment/pvc to cleanup
+	result := SchedulingResult{
+		Node:             nil,
+		CanaryDeployment: "",
+		CanaryPVC:        "",
+	}
+
+	// build the canary deployment.
+	d := c.makeDeployment(mon)
+	d.Name += "-canary"
+	d.Spec.Template.ObjectMeta.Name += "-canary"
+
+	// the canary and real monitor deployments will mount the same storage. to
+	// avoid issues with the real deployment, the canary should be careful not
+	// to modify the storage by instead running an innocuous command.
+	d.Spec.Template.Spec.InitContainers = []v1.Container{}
+	d.Spec.Template.Spec.Containers[0].Image = c.rookVersion
+	d.Spec.Template.Spec.Containers[0].Command = []string{"/tini"}
+	d.Spec.Template.Spec.Containers[0].Args = []string{"--", "sleep", "3600"}
+
+	// setup affinity settings for pod scheduling
+	p := cephv1.GetMonPlacement(c.spec.Placement)
+	c.setPodPlacement(&d.Spec.Template.Spec, p, nil)
+
+	// setup storage on the canary since scheduling will be affected when
+	// monitors are configured to use persistent volumes. the pvcName is set to
+	// the non-empty name of the PVC only when the PVC is created as a result of
+	// this call to the scheduler.
+	var pvcName string
+	if c.spec.Mon.VolumeClaimTemplate == nil {
+		d.Spec.Template.Spec.Volumes = append(d.Spec.Template.Spec.Volumes,
+			opspec.DaemonVolumesDataHostPath(mon.DataPathMap)...)
+	} else {
+		// the pvc that is created here won't be deleted: it will be reattached
+		// to the real monitor deployment.
+		pvc, err := c.makeDeploymentPVC(mon)
+		if err != nil {
+			return result, fmt.Errorf("sched-mon: failed to make monitor %s pvc. %+v", d.Name, err)
+		}
+
+		_, err = c.context.Clientset.CoreV1().PersistentVolumeClaims(c.Namespace).Create(pvc)
+		if err == nil {
+			pvcName = pvc.Name
+			logger.Infof("sched-mon: created canary monitor %s pvc %s", d.Name, pvc.Name)
+		} else {
+			if errors.IsAlreadyExists(err) {
+				logger.Debugf("sched-mon: creating mon %s pvc %s: already exists.", d.Name, pvc.Name)
+			} else {
+				return result, fmt.Errorf("sched-mon: error creating mon %s pvc %s. %+v", d.Name, pvc.Name, err)
+			}
+		}
+
+		d.Spec.Template.Spec.Volumes = append(d.Spec.Template.Spec.Volumes,
+			opspec.DaemonVolumesDataPVC(mon.ResourceName))
+		opspec.AddVolumeMountSubPath(&d.Spec.Template.Spec, "ceph-daemon-data")
+	}
+
+	// caller should arrange for clean-up of the PVC only if it was created
+	// during this scheduling instance and we encounter an irrecoverable error.
+	result.CanaryPVC = pvcName
+
+	// spin up the canary deployment. if it exists, delete it first, since if it
+	// already exists it may have been scheduled with a different crd config.
+	createdDeployment := false
+	for i := 0; i < canaryRetries; i++ {
+		_, err := c.context.Clientset.AppsV1().Deployments(c.Namespace).Create(d)
+		if err == nil {
+			createdDeployment = true
+			logger.Infof("sched-mon: created canary deployment %s", d.Name)
+			break
+		} else if errors.IsAlreadyExists(err) {
+			if err := k8sutil.DeleteDeployment(c.context.Clientset, c.Namespace, d.Name); err != nil {
+				return result, fmt.Errorf("sched-mon: error deleting canary deployment %s. %+v", d.Name, err)
+			}
+			logger.Infof("sched-mon: deleted existing canary deployment %s", d.Name)
+			time.Sleep(time.Second * canaryRetryDelaySeconds)
+		} else {
+			return result, fmt.Errorf("sched-mon: error creating canary monitor deployment %s. %+v", d.Name, err)
+		}
+	}
+
+	// failed after retrying
+	if !createdDeployment {
+		return result, fmt.Errorf("sched-mon: failed to create canary deployment %s", d.Name)
+	}
+
+	// caller should arrange for the deployment to be removed
+	result.CanaryDeployment = d.Name
+
+	// wait for the scheduler to make a placement decision
+	for i := 0; i < canaryRetries; i++ {
+		listOptions := metav1.ListOptions{
+			LabelSelector: labels.Set(d.Spec.Selector.MatchLabels).String(),
+		}
+
+		pods, err := c.context.Clientset.CoreV1().Pods(c.Namespace).List(listOptions)
+		if err != nil {
+			return result, fmt.Errorf("sched-mon: error listing canary pods %s. %+v", d.Name, err)
+		}
+
+		if len(pods.Items) == 0 {
+			logger.Infof("sched-mon: waiting for canary pod creation %s", d.Name)
+			time.Sleep(time.Second * canaryRetryDelaySeconds)
+			continue
+		}
+
+		pod := pods.Items[0]
+		if pod.Spec.NodeName == "" {
+			logger.Debugf("sched-mon: monitor %s canary pod %s not yet scheduled", d.Name, pod.Name)
+			time.Sleep(time.Second * canaryRetryDelaySeconds)
+			continue
+		}
+
+		node, err := c.context.Clientset.CoreV1().Nodes().Get(pod.Spec.NodeName, metav1.GetOptions{})
+		if err != nil {
+			return result, fmt.Errorf("sched-mon: error getting node %s. %+v", pod.Spec.NodeName, err)
+		}
+
+		result.Node = node
+		result.CanaryPVC = ""
+		logger.Infof("sched-mon: canary monitor deployment %s scheduled to %s", d.Name, node.Name)
+		return result, nil
+	}
+
+	return result, fmt.Errorf("sched-mon: canary pod scheduling failed retries")
 }
 
 func (c *Cluster) initMonIPs(mons []*monConfig) error {
 	for _, m := range mons {
-		if c.HostNetwork {
+		if c.Network.IsHost() {
 			logger.Infof("setting mon endpoints for hostnetwork mode")
 			node, ok := c.mapping.Node[m.DaemonName]
 			if !ok {
@@ -379,135 +564,88 @@ func (c *Cluster) initMonIPs(mons []*monConfig) error {
 			}
 			m.PublicIP = serviceIP
 		}
-		c.clusterInfo.Monitors[m.DaemonName] = cephconfig.NewMonInfo(m.DaemonName, m.PublicIP, m.Port)
+		c.ClusterInfo.Monitors[m.DaemonName] = cephconfig.NewMonInfo(m.DaemonName, m.PublicIP, m.Port)
 	}
 
 	return nil
 }
 
-// find a suitable node for this monitor. first look for a fault zone that has
-// no monitors. only after the nodes with zone labels are considered are the
-// unlabeled nodes considered. reasonsing: without more information, _at worst_
-// the unlabled nodes are actually in the set of labeled zones, and at best,
-// they are in distinct zones.
-func scheduleMonitor(mon *monConfig, nodeZones [][]NodeUsage) *NodeUsage {
-	// the node choice for this monitor
-	var nodeChoice *NodeUsage
-
-	// for each zone, in order of preference. unlabeled nodes are last, by
-	// construction; see Cluster.getNodeMonusage().
-	for zi := range nodeZones {
-		// number of monitors in the zone
-		zoneMonCount := 0
-
-		// preferential node choice from this zone for a new mon
-		var zoneNodeChoice *NodeUsage
-
-		// for each node in this zone
-		for ni := range nodeZones[zi] {
-			nodeUsage := &nodeZones[zi][ni]
-
-			// skip invalid nodes. but update the mon count first since
-			// invalid nodes could still have an assigned mon pod.
-			zoneMonCount += nodeUsage.MonCount
-			if !nodeUsage.MonValid {
-				logger.Infof("schedmon: skip invalid node %s for mon scheduling",
-					nodeUsage.Node.Name)
-				continue
+func (c *Cluster) assignMons(mons []*monConfig) error {
+	// when monitors are scheduling below by invoking scheduleMonitor() a canary
+	// deployment and optional canary PVC are created. in order for the
+	// anti-affinity rules to be effective, we leave the canary pods in place
+	// until all of the canaries have been scheduled. only after the
+	// monitor/node assignment process is complete are the canary deployments
+	// and pvcs removed here.
+	canaryCleanup := []SchedulingResult{}
+	defer func() {
+		for _, result := range canaryCleanup {
+			logger.Infof("assignmon: cleaning up canary deployment %s and canary pvc %s", result.CanaryDeployment, result.CanaryPVC)
+			if result.CanaryDeployment != "" {
+				if err := k8sutil.DeleteDeployment(c.context.Clientset, c.Namespace, result.CanaryDeployment); err != nil {
+					logger.Infof("assignmon: error deleting canary deployment %s. %+v", result.CanaryDeployment, err)
+				}
 			}
-
-			// make a "best" choice from this zone. in this case that is the
-			// node with the least amount of monitors.
-			if zoneNodeChoice == nil || nodeUsage.MonCount < zoneNodeChoice.MonCount {
-				logger.Infof("schedmon: considering node %s with mon count %d",
-					nodeUsage.Node.Name, nodeUsage.MonCount)
-				zoneNodeChoice = nodeUsage
-			}
-		}
-
-		// We identified _a_ valid node in the zone. should we choose it?
-		if zoneNodeChoice != nil {
-			if zoneMonCount == 0 {
-				// this zone has no monitors, which implies that
-				// zoneNodeChoice will be a node without any monitors
-				// currently assigned. choose this node.
-				logger.Infof("schedmon: considering node %s from empty zone",
-					zoneNodeChoice.Node.Name)
-				nodeChoice = zoneNodeChoice
-				break
-			} else {
-				// this zone already has a monitor in it. but keep the
-				// choice as a backup; we may find that all zones already
-				// have a monitor and still need to make an assignment.
-				if nodeChoice == nil || zoneNodeChoice.MonCount < nodeChoice.MonCount {
-					logger.Infof("schedmon: considering node %s with mon count %d",
-						zoneNodeChoice.Node.Name, zoneNodeChoice.MonCount)
-					nodeChoice = zoneNodeChoice
+			if result.CanaryPVC != "" {
+				var gracePeriod int64 // delete immediately
+				propagation := metav1.DeletePropagationForeground
+				options := &metav1.DeleteOptions{GracePeriodSeconds: &gracePeriod, PropagationPolicy: &propagation}
+				err := c.context.Clientset.CoreV1().PersistentVolumeClaims(c.Namespace).Delete(result.CanaryPVC, options)
+				if err != nil {
+					logger.Infof("assignmon: error removing canary monitor %s pvc %s. %+v", result.CanaryDeployment, result.CanaryPVC, err)
 				}
 			}
 		}
-	}
+	}()
 
-	if nodeChoice != nil {
-		logger.Infof("schedmon: scheduling mon %s on node %s",
-			mon.DaemonName, nodeChoice.Node.Name)
-	} else {
-		logger.Infof("schedmon: no suitable node found for mon %s",
-			mon.DaemonName)
-	}
-
-	return nodeChoice
-}
-
-func (c *Cluster) assignMons(mons []*monConfig) error {
-
-	// retrieve the set of cluster nodes and their monitor usage info
-	nodeZones, err := c.getNodeMonUsage()
-	if err != nil {
-		return fmt.Errorf("failed to get node monitor usage. %+v", err)
-	}
-
-	// ensure all monitors have a node assignment. note that this isn't
-	// necessarily optimal: it does not try to move existing monitors which is
-	// handled by the periodic monitor health checks.
+	// ensure that all monitors have either (1) a node assignment that will be
+	// enforced using a node selector, or (2) configuration permits k8s to handle
+	// scheduling for the monitor.
 	for _, mon := range mons {
 
-		// monitor is already assigned to a node. nothing to do
+		// scheduling for this monitor has already been completed
 		if _, ok := c.mapping.Node[mon.DaemonName]; ok {
-			logger.Infof("assignmon: mon %s already assigned to a node", mon.DaemonName)
+			logger.Debugf("assignmon: mon %s already scheduled", mon.DaemonName)
 			continue
 		}
 
-		nodeChoice := scheduleMonitor(mon, nodeZones)
+		// determine a placement for the monitor. note that this scheduling is
+		// performed even when a node selector is not required. this may be
+		// non-optimal, but it is convenient to catch some failures early,
+		// before a decision is stored in the node mapping.
+		result, err := scheduleMonitor(c, mon)
 
-		if nodeChoice == nil {
-			return fmt.Errorf("assignmon: no valid nodes available for mon placement")
-		}
+		// even if an error occurs cleanup may be necessary
+		canaryCleanup = append(canaryCleanup, result)
 
-		// note that we do not need to worry about a false negative here (i.e. a
-		// node exists that _would_ pass this check) due to the search landing in a
-		// local minima because if a node had existed with a mon count of zero,
-		// scheduleMonitor would have chosen it over any node with a positive
-		// mon count.
-		if nodeChoice.MonCount > 0 && !c.spec.Mon.AllowMultiplePerNode {
-			return fmt.Errorf("assignmon: no empty nodes available for mon placement")
-		}
-
-		// make this decision visible when scheduling the next monitor
-		nodeChoice.MonCount++
-
-		logger.Infof("assignmon: mon %s assigned to node %s", mon.DaemonName, nodeChoice.Node.Name)
-
-		nodeInfo, err := getNodeInfoFromNode(*nodeChoice.Node)
 		if err != nil {
-			return fmt.Errorf("couldn't get node info from node %s. %+v",
-				nodeChoice.Node.Name, err)
+			return fmt.Errorf("assignmon: error scheduling monitor: %+v", err)
+		}
+
+		nodeChoice := result.Node
+		if nodeChoice == nil {
+			return fmt.Errorf("assignmon: could not schedule monitor %s", mon.DaemonName)
+		}
+
+		// store nil in the node mapping to indicate that an explicit node
+		// placement is not being made. otherwise, the node choice will map
+		// directly to a node selector on the monitor pod.
+		var nodeInfo *NodeInfo = nil
+		if c.Network.IsHost() || c.spec.Mon.VolumeClaimTemplate == nil {
+			logger.Infof("assignmon: mon %s assigned to node %s", mon.DaemonName, nodeChoice.Name)
+			nodeInfo, err = getNodeInfoFromNode(*nodeChoice)
+			if err != nil {
+				return fmt.Errorf("assignmon: couldn't get node info for node %s. %+v",
+					nodeChoice.Name, err)
+			}
+		} else {
+			logger.Infof("assignmon: mon %s placement using native scheduler", mon.DaemonName)
 		}
 
 		c.mapping.Node[mon.DaemonName] = nodeInfo
 	}
 
-	logger.Debug("assignmons: mons have been assigned to nodes")
+	logger.Debug("assignmons: mons have been scheduled")
 	return nil
 }
 
@@ -519,7 +657,7 @@ func (c *Cluster) startDeployments(mons []*monConfig, requireAllInQuorum bool) e
 	// Ensure each of the mons have been created. If already created, it will be a no-op.
 	for i := 0; i < len(mons); i++ {
 		node, _ := c.mapping.Node[mons[i].DaemonName]
-		err := c.startMon(mons[i], node.Hostname)
+		err := c.startMon(mons[i], node)
 		if err != nil {
 			return fmt.Errorf("failed to create mon %s. %+v", mons[i].DaemonName, err)
 		}
@@ -537,7 +675,7 @@ func (c *Cluster) startDeployments(mons []*monConfig, requireAllInQuorum bool) e
 	// Final verification that **all** mons are in quorum
 	// Do not proceed if one monitor is still syncing
 	// Only do this when monitors versions are different so we don't block the orchestration if a mon is down.
-	versions, err := client.GetAllCephDaemonVersions(c.context, c.clusterInfo.Name)
+	versions, err := client.GetAllCephDaemonVersions(c.context, c.ClusterInfo.Name)
 	if err != nil {
 		logger.Warningf("failed to get ceph daemons versions; this likely means there is no cluster yet. %+v", err)
 	} else {
@@ -560,7 +698,7 @@ func (c *Cluster) waitForMonsToJoin(mons []*monConfig, requireAllInQuorum bool) 
 
 	// wait for the monitors to join quorum
 	sleepTime := 5
-	err := waitForQuorumWithMons(c.context, c.clusterInfo.Name, starting, sleepTime, requireAllInQuorum)
+	err := waitForQuorumWithMons(c.context, c.ClusterInfo.Name, starting, sleepTime, requireAllInQuorum)
 	if err != nil {
 		return fmt.Errorf("failed to wait for mon quorum. %+v", err)
 	}
@@ -583,13 +721,13 @@ func (c *Cluster) saveMonConfig() error {
 	}
 
 	csiConfigValue, err := csi.FormatCsiClusterConfig(
-		c.Namespace, c.clusterInfo.Monitors)
+		c.Namespace, c.ClusterInfo.Monitors)
 	if err != nil {
 		return fmt.Errorf("failed to format csi config: %+v", err)
 	}
 
 	configMap.Data = map[string]string{
-		EndpointDataKey: FlattenMonEndpoints(c.clusterInfo.Monitors),
+		EndpointDataKey: FlattenMonEndpoints(c.ClusterInfo.Monitors),
 		MaxMonIDKey:     strconv.Itoa(c.maxMonID),
 		MappingKey:      string(monMapping),
 		csi.ConfigKey:   csiConfigValue,
@@ -610,14 +748,14 @@ func (c *Cluster) saveMonConfig() error {
 
 	// Every time the mon config is updated, must also update the global config so that all daemons
 	// have the most updated version if they restart.
-	config.GetStore(c.context, c.Namespace, &c.ownerRef).CreateOrUpdate(c.clusterInfo)
+	config.GetStore(c.context, c.Namespace, &c.ownerRef).CreateOrUpdate(c.ClusterInfo)
 
 	// write the latest config to the config dir
-	if err := WriteConnectionConfig(c.context, c.clusterInfo); err != nil {
+	if err := WriteConnectionConfig(c.context, c.ClusterInfo); err != nil {
 		return fmt.Errorf("failed to write connection config for new mons. %+v", err)
 	}
 
-	if err := csi.SaveClusterConfig(c.context.Clientset, c.Namespace, c.clusterInfo, c.csiConfigMutex); err != nil {
+	if err := csi.SaveClusterConfig(c.context.Clientset, c.Namespace, c.ClusterInfo, c.csiConfigMutex); err != nil {
 		return fmt.Errorf("failed to update csi cluster config: %+v", err)
 	}
 
@@ -632,17 +770,21 @@ func (c *Cluster) updateMon(m *monConfig, d *apps.Deployment) error {
 
 	daemonType := string(config.MonType)
 	var cephVersionToUse cephver.CephVersion
-	currentCephVersion, err := client.LeastUptodateDaemonVersion(c.context, c.clusterInfo.Name, daemonType)
-	if err != nil {
-		logger.Warningf("failed to retrieve current ceph %s version. %+v", daemonType, err)
-		logger.Debug("could not detect ceph version during update, this is likely an initial bootstrap, proceeding with c.clusterInfo.CephVersion")
-		cephVersionToUse = c.clusterInfo.CephVersion
-	} else {
-		logger.Debugf("current cluster version for monitors before upgrading is: %+v", currentCephVersion)
-		cephVersionToUse = currentCephVersion
+
+	// If this is not an upgrade there is no need to check the ceph version
+	if c.isUpgrade {
+		currentCephVersion, err := client.LeastUptodateDaemonVersion(c.context, c.ClusterInfo.Name, daemonType)
+		if err != nil {
+			logger.Warningf("failed to retrieve current ceph %s version. %+v", daemonType, err)
+			logger.Debug("could not detect ceph version during update, this is likely an initial bootstrap, proceeding with %+v", c.ClusterInfo.CephVersion)
+			cephVersionToUse = c.ClusterInfo.CephVersion
+		} else {
+			logger.Debugf("current cluster version for monitors before upgrading is: %+v", currentCephVersion)
+			cephVersionToUse = currentCephVersion
+		}
 	}
 
-	err = updateDeploymentAndWait(c.context, d, c.Namespace, daemonType, m.DaemonName, cephVersionToUse)
+	err := updateDeploymentAndWait(c.context, d, c.Namespace, daemonType, m.DaemonName, cephVersionToUse, c.isUpgrade)
 	if err != nil {
 		return fmt.Errorf("failed to update mon deployment %s. %+v", m.ResourceName, err)
 	}
@@ -650,13 +792,42 @@ func (c *Cluster) updateMon(m *monConfig, d *apps.Deployment) error {
 	return nil
 }
 
-func (c *Cluster) startMon(m *monConfig, hostname string) error {
-
+// startMon creates or updates a monitor deployment.
+//
+// The node parameter specifies the node to be used as a node selector on the
+// monitor pod. It is the result of scheduling a canary pod: see
+// scheduleMonitor() for more details on scheduling.
+//
+// The node parameter is optional. When the parameter is nil it indicates that
+// the pod should not use a node selector, and should instead rely on k8s to
+// perform scheduling.
+//
+// The following outlines the different scenarios that exist and how deployments
+// should be configured w.r.t. scheduling and the use of a node selector.
+//
+// 1) if HostNetworking -> always use node selector. we do not want to change
+//    the IP address of a monitor as it is wrapped up in the monitor's identity.
+//    with host networking we use node selector to ensure a stable IP for each
+//    monitor. see scheduleMonitor() comment for more details.
+//
+// Note: an important assumption is that HostNetworking setting does not
+// change once a cluster is created.
+//
+// 2) if *not* HostNetworking -> stable IP from service; may avoid node selector
+//      a) when creating a new deployment
+//           - if HostPath -> use node selector for storage/node affinity
+//           - if PVC      -> node selector is not required
+//
+//      b) when updating a deployment
+//           - if HostPath -> leave node selector as is
+//           - if PVC      -> remove node selector, if present
+//
+func (c *Cluster) startMon(m *monConfig, node *NodeInfo) error {
 	// check if the monitor deployment already exists. if the deployment does
 	// exist, also determine if it using pvc storage.
 	pvcExists := false
 	deploymentExists := false
-	d := c.makeDeployment(m, hostname)
+	d := c.makeDeployment(m)
 	existingDeployment, err := c.context.Clientset.AppsV1().Deployments(c.Namespace).Get(d.Name, metav1.GetOptions{})
 	if err == nil {
 		deploymentExists = true
@@ -681,7 +852,22 @@ func (c *Cluster) startMon(m *monConfig, hostname string) error {
 		logger.Debugf("adding host path volume source to mon deployment %s", d.Name)
 	}
 
+	// placement settings from the CRD
+	p := cephv1.GetMonPlacement(c.spec.Placement)
+
 	if deploymentExists {
+		// the existing deployment may have a node selector. if the cluster
+		// isn't using host networking and the deployment is using pvc storage,
+		// then the node selector can be removed. this may happen after
+		// upgrading the cluster with the k8s scheduling support for monitors.
+		if c.Network.IsHost() || !pvcExists {
+			p.PodAffinity = nil
+			p.PodAntiAffinity = nil
+			c.setPodPlacement(&d.Spec.Template.Spec, p,
+				existingDeployment.Spec.Template.Spec.NodeSelector)
+		} else {
+			c.setPodPlacement(&d.Spec.Template.Spec, p, nil)
+		}
 		return c.updateMon(m, d)
 	}
 
@@ -698,6 +884,15 @@ func (c *Cluster) startMon(m *monConfig, hostname string) error {
 				return fmt.Errorf("failed to create mon %s pvc %s. %+v", d.Name, pvc.Name, err)
 			}
 		}
+	}
+
+	if node == nil {
+		c.setPodPlacement(&d.Spec.Template.Spec, p, nil)
+	} else {
+		p.PodAffinity = nil
+		p.PodAntiAffinity = nil
+		c.setPodPlacement(&d.Spec.Template.Spec, p,
+			map[string]string{v1.LabelHostname: node.Hostname})
 	}
 
 	logger.Debugf("Starting mon: %+v", d.Name)
@@ -730,7 +925,7 @@ func waitForQuorumWithMons(context *clusterd.Context, clusterName string, mons [
 		allPodsRunning := true
 		var runningMonNames []string
 		for _, m := range mons {
-			running, err := k8sutil.PodsRunningWithLabel(context.Clientset, clusterName, fmt.Sprintf("app=%s,mon=%s", appName, m))
+			running, err := k8sutil.PodsRunningWithLabel(context.Clientset, clusterName, fmt.Sprintf("app=%s,mon=%s", AppName, m))
 			if err != nil {
 				logger.Infof("failed to query mon pod status, trying again. %+v", err)
 				continue

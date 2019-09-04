@@ -21,6 +21,7 @@ import (
 	"testing"
 
 	cephv1 "github.com/rook/rook/pkg/apis/ceph.rook.io/v1"
+	rook "github.com/rook/rook/pkg/apis/rook.io/v1alpha2"
 	"github.com/rook/rook/pkg/clusterd"
 	"github.com/rook/rook/pkg/operator/ceph/config"
 	opspec "github.com/rook/rook/pkg/operator/ceph/spec"
@@ -45,9 +46,10 @@ func testPodSpec(t *testing.T, monID string, pvc bool) {
 		&clusterd.Context{Clientset: clientset, ConfigDir: "/var/lib/rook"},
 		"ns",
 		"/var/lib/rook",
-		false,
+		cephv1.NetworkSpec{},
 		metav1.OwnerReference{},
 		&sync.Mutex{},
+		false,
 	)
 	setCommonMonProperties(c, 0, cephv1.MonSpec{Count: 3, AllowMultiplePerNode: true}, "rook/rook:myversion")
 	c.spec.CephVersion = cephv1.CephVersionSpec{Image: "ceph/ceph:myceph"}
@@ -64,7 +66,7 @@ func testPodSpec(t *testing.T, monID string, pvc bool) {
 	}
 	monConfig := testGenMonConfig(monID)
 
-	d := c.makeDeployment(monConfig, "node0")
+	d := c.makeDeployment(monConfig)
 	assert.NotNil(t, d)
 
 	if pvc {
@@ -77,10 +79,10 @@ func testPodSpec(t *testing.T, monID string, pvc bool) {
 
 	// Deployment should have Ceph labels
 	cephtest.AssertLabelsContainCephRequirements(t, d.ObjectMeta.Labels,
-		config.MonType, monID, appName, "ns")
+		config.MonType, monID, AppName, "ns")
 
 	podTemplate := cephtest.NewPodTemplateSpecTester(t, &d.Spec.Template)
-	podTemplate.RunFullSuite(config.MonType, monID, appName, "ns", "ceph/ceph:myceph",
+	podTemplate.RunFullSuite(config.MonType, monID, AppName, "ns", "ceph/ceph:myceph",
 		"200", "100", "1337", "500" /* resources */)
 }
 
@@ -90,9 +92,10 @@ func TestDeploymentPVCSpec(t *testing.T) {
 		&clusterd.Context{Clientset: clientset, ConfigDir: "/var/lib/rook"},
 		"ns",
 		"/var/lib/rook",
-		false,
+		cephv1.NetworkSpec{},
 		metav1.OwnerReference{},
 		&sync.Mutex{},
+		false,
 	)
 	setCommonMonProperties(c, 0, cephv1.MonSpec{Count: 3, AllowMultiplePerNode: true}, "rook/rook:myversion")
 	c.spec.CephVersion = cephv1.CephVersionSpec{Image: "ceph/ceph:myceph"}
@@ -144,4 +147,76 @@ func TestDeploymentPVCSpec(t *testing.T) {
 	pvc, err = c.makeDeploymentPVC(monConfig)
 	assert.NoError(t, err)
 	assert.Equal(t, pvc.Spec.Resources.Requests[v1.ResourceStorage], req)
+}
+
+func testPodSpecPlacement(t *testing.T, hostNet, allowMulti bool, req, pref int, placement *rook.Placement) {
+	clientset := testop.New(1)
+	c := New(
+		&clusterd.Context{Clientset: clientset, ConfigDir: "/var/lib/rook"},
+		"ns",
+		"/var/lib/rook",
+		cephv1.NetworkSpec{HostNetwork: hostNet},
+		metav1.OwnerReference{},
+		&sync.Mutex{},
+		false,
+	)
+
+	setCommonMonProperties(c, 0, cephv1.MonSpec{Count: 3, AllowMultiplePerNode: allowMulti}, "rook/rook:myversion")
+	monConfig := testGenMonConfig("a")
+
+	if placement != nil {
+		c.spec.Placement = rook.PlacementSpec{}
+		c.spec.Placement["mon"] = *placement
+	}
+
+	d := c.makeDeployment(monConfig)
+	assert.NotNil(t, d)
+
+	p := cephv1.GetMonPlacement(c.spec.Placement)
+	c.setPodPlacement(&d.Spec.Template.Spec, p, nil)
+
+	// should have a required anti-affnity and no preferred anti-affinity
+	assert.Equal(t,
+		req,
+		len(d.Spec.Template.Spec.Affinity.PodAntiAffinity.RequiredDuringSchedulingIgnoredDuringExecution))
+	assert.Equal(t,
+		pref,
+		len(d.Spec.Template.Spec.Affinity.PodAntiAffinity.PreferredDuringSchedulingIgnoredDuringExecution))
+}
+
+func makePlacement() rook.Placement {
+	return rook.Placement{
+		PodAntiAffinity: &v1.PodAntiAffinity{
+			RequiredDuringSchedulingIgnoredDuringExecution: []v1.PodAffinityTerm{
+				{
+					TopologyKey: v1.LabelZoneFailureDomain,
+				},
+			},
+			PreferredDuringSchedulingIgnoredDuringExecution: []v1.WeightedPodAffinityTerm{
+				{
+					PodAffinityTerm: v1.PodAffinityTerm{
+						TopologyKey: v1.LabelZoneFailureDomain,
+					},
+				},
+			},
+		},
+	}
+}
+
+func TestPodSpecPlacement(t *testing.T) {
+	// no placement settings in the crd
+	testPodSpecPlacement(t, true, true, 1, 0, nil)
+	testPodSpecPlacement(t, true, false, 1, 0, nil)
+	testPodSpecPlacement(t, false, true, 0, 1, nil)
+	testPodSpecPlacement(t, false, false, 1, 0, nil)
+
+	// crd has other preferred and required anti-affinity setting
+	p := makePlacement()
+	testPodSpecPlacement(t, true, true, 2, 1, &p)
+	p = makePlacement()
+	testPodSpecPlacement(t, true, false, 2, 1, &p)
+	p = makePlacement()
+	testPodSpecPlacement(t, false, true, 1, 2, &p)
+	p = makePlacement()
+	testPodSpecPlacement(t, false, false, 2, 1, &p)
 }

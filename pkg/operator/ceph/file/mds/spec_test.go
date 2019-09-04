@@ -36,7 +36,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
-func testDeploymentObject(hostNetwork bool) *apps.Deployment {
+func testDeploymentObject(network cephv1.NetworkSpec) *apps.Deployment {
 	fs := cephv1.CephFilesystem{
 		ObjectMeta: metav1.ObjectMeta{Name: "myfs", Namespace: "ns"},
 		Spec: cephv1.FilesystemSpec{
@@ -65,12 +65,15 @@ func testDeploymentObject(hostNetwork bool) *apps.Deployment {
 		clusterInfo,
 		&clusterd.Context{Clientset: testop.New(1)},
 		"rook/rook:myversion",
-		cephv1.CephVersionSpec{Image: "ceph/ceph:testversion"},
-		hostNetwork,
+		&cephv1.ClusterSpec{
+			CephVersion: cephv1.CephVersionSpec{Image: "ceph/ceph:testversion"},
+			Network:     network,
+		},
 		fs,
 		&client.CephFilesystemDetails{ID: 15},
 		[]metav1.OwnerReference{{}},
 		"/var/lib/rook/",
+		false,
 	)
 	mdsTestConfig := &mdsConfig{
 		DaemonID:     "myfs-a",
@@ -81,7 +84,7 @@ func testDeploymentObject(hostNetwork bool) *apps.Deployment {
 }
 
 func TestPodSpecs(t *testing.T) {
-	d := testDeploymentObject(false) // no host network
+	d := testDeploymentObject(cephv1.NetworkSpec{HostNetwork: false}) // no host network
 
 	assert.NotNil(t, d)
 	assert.Equal(t, v1.RestartPolicyAlways, d.Spec.Template.Spec.RestartPolicy)
@@ -96,7 +99,7 @@ func TestPodSpecs(t *testing.T) {
 }
 
 func TestHostNetwork(t *testing.T) {
-	d := testDeploymentObject(true) // host network
+	d := testDeploymentObject(cephv1.NetworkSpec{HostNetwork: true}) // host network
 
 	assert.Equal(t, true, d.Spec.Template.Spec.HostNetwork)
 	assert.Equal(t, v1.DNSClusterFirstWithHostNet, d.Spec.Template.Spec.DNSPolicy)

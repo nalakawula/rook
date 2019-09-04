@@ -27,6 +27,7 @@ stage](https://kubernetes.io/blog/2018/10/09/introducing-volume-snapshot-alpha-f
 (k8s 1.12+), make sure to enable the `VolumeSnapshotDataSource` feature gate on
 your Kubernetes cluster API server.
 
+
 ```
 --feature-gates=VolumeSnapshotDataSource=true
 ```
@@ -119,3 +120,20 @@ kubectl delete -f cluster/examples/kubernetes/ceph/csi/example/rbd/pvc-restore.y
 kubectl delete -f cluster/examples/kubernetes/ceph/csi/example/rbd/snapshot.yaml
 kubectl delete -f cluster/examples/kubernetes/ceph/csi/example/rbd/snapshotclass.yaml
 ```
+
+## Liveness Sidecar
+
+All CSI pods are deployed with a sidecar container that provides a prometheus metric for tracking if the CSI plugin is alive and runnning.
+These metrics are meant to be collected by prometheus but can be acceses through a GET request to a specific node ip.
+for example `curl -X get http://[pod ip]:[liveness-port][liveness-path]  2>/dev/null | grep csi`
+the expected output should be
+
+```bash
+curl -X GET http://10.109.65.142:9080/metrics 2>/dev/null | grep csi
+# HELP csi_liveness Liveness Probe
+# TYPE csi_liveness gauge
+csi_liveness 1
+```
+
+Check the [monitoring doc](ceph-monitoring.md) to see how to integrate CSI
+liveness and grpc metrics into ceph monitoring.

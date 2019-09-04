@@ -68,9 +68,9 @@ func (c *clusterConfig) makeRGWPodSpec(rgwConfig *rgwConfig) v1.PodTemplateSpec 
 			opspec.DaemonVolumes(c.DataPathMap, rgwConfig.ResourceName),
 			c.mimeTypesVolume(),
 		),
-		HostNetwork: c.hostNetwork,
+		HostNetwork: c.clusterSpec.Network.IsHost(),
 	}
-	if c.hostNetwork {
+	if c.clusterSpec.Network.IsHost() {
 		podSpec.DNSPolicy = v1.DNSClusterFirstWithHostNet
 	}
 
@@ -106,7 +106,7 @@ func (c *clusterConfig) makeDaemonContainer(rgwConfig *rgwConfig) v1.Container {
 	// start the rgw daemon in the foreground
 	container := v1.Container{
 		Name:  "rgw",
-		Image: c.cephVersion.Image,
+		Image: c.clusterSpec.CephVersion.Image,
 		Command: []string{
 			"radosgw",
 		},
@@ -117,13 +117,13 @@ func (c *clusterConfig) makeDaemonContainer(rgwConfig *rgwConfig) v1.Container {
 				cephconfig.NewFlag("name", generateCephXUser(rgwConfig.ResourceName)),
 				cephconfig.NewFlag("host", opspec.ContainerEnvVarReference("POD_NAME")),
 				cephconfig.NewFlag("rgw-mime-types-file", mimeTypesMountPath()),
-			), c.defaultSettings().GlobalFlags()..., // use default settings as flags until mon kv store supported
+			), c.defaultFlags()..., // use default settings as flags until mon kv store supported
 		),
 		VolumeMounts: append(
 			opspec.DaemonVolumeMounts(c.DataPathMap, rgwConfig.ResourceName),
 			c.mimeTypesVolumeMount(),
 		),
-		Env:       opspec.DaemonEnvVars(c.cephVersion.Image),
+		Env:       opspec.DaemonEnvVars(c.clusterSpec.CephVersion.Image),
 		Resources: c.store.Spec.Gateway.Resources,
 		LivenessProbe: &v1.Probe{
 			Handler: v1.Handler{
@@ -160,7 +160,7 @@ func (c *clusterConfig) startService() (string, error) {
 		},
 	}
 	k8sutil.SetOwnerRefs(&svc.ObjectMeta, c.ownerRefs)
-	if c.hostNetwork {
+	if c.clusterSpec.Network.IsHost() {
 		svc.Spec.ClusterIP = v1.ClusterIPNone
 	}
 

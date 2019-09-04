@@ -52,20 +52,20 @@ var PoolResource = opkit.CustomResource{
 
 // PoolController represents a controller object for pool custom resources
 type PoolController struct {
-	context   *clusterd.Context
-	namespace string
+	context     *clusterd.Context
+	clusterSpec *cephv1.ClusterSpec
 }
 
 // NewPoolController create controller for watching pool custom resources created
-func NewPoolController(context *clusterd.Context, namespace string) *PoolController {
+func NewPoolController(context *clusterd.Context, clusterSpec *cephv1.ClusterSpec) *PoolController {
 	return &PoolController{
-		context:   context,
-		namespace: namespace,
+		context:     context,
+		clusterSpec: clusterSpec,
 	}
 }
 
 // Watch watches for instances of Pool custom resources and acts on them
-func (c *PoolController) StartWatch(stopCh chan struct{}) error {
+func (c *PoolController) StartWatch(namespace string, stopCh chan struct{}) error {
 
 	resourceHandlerFuncs := cache.ResourceEventHandlerFuncs{
 		AddFunc:    c.onAdd,
@@ -73,8 +73,8 @@ func (c *PoolController) StartWatch(stopCh chan struct{}) error {
 		DeleteFunc: c.onDelete,
 	}
 
-	logger.Infof("start watching pool resources in namespace %s", c.namespace)
-	watcher := opkit.NewWatcher(PoolResource, c.namespace, resourceHandlerFuncs, c.context.RookClientset.CephV1().RESTClient())
+	logger.Infof("start watching clusters in all namespaces")
+	watcher := opkit.NewWatcher(PoolResource, namespace, resourceHandlerFuncs, c.context.RookClientset.CephV1().RESTClient())
 	go watcher.Watch(&cephv1.CephBlockPool{}, stopCh)
 	return nil
 }
@@ -124,7 +124,8 @@ func (c *PoolController) onUpdate(oldObj, newObj interface{}) {
 	}
 }
 
-func (c *PoolController) ParentClusterChanged(cluster cephv1.ClusterSpec, clusterInfo *cephconfig.ClusterInfo) {
+// ParentClusterChanged determines wether or not a CR update has been sent
+func (c *PoolController) ParentClusterChanged(cluster cephv1.ClusterSpec, clusterInfo *cephconfig.ClusterInfo, isUpgrade bool) {
 	logger.Debugf("No need to update the pool after the parent cluster changed")
 }
 

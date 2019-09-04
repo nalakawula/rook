@@ -12,6 +12,10 @@ an example usage
 - The integration tests can be triggered for specific storage providers rather than always running all tests. See the [dev guide](INSTALL.md#test-storage-provider) for more details.
 - Provisioning will fail if the user specifies a `metadataDevice` but that device is not used as a metadata device by Ceph.
 - Allow `metadataDevice` to be set per OSD device in the device specific `config` section.
+- [YugabyteDB](https://www.yugabyte.com/) is now supported by Rook with a new operator. You can deploy, configure and manage instances of this high-performance distributed SQL database. Create an instance of the new `ybcluster.yugabytedb.rook.io` custom resource to easily deploy a cluster of YugabyteDB Database. Checkout its [user guide](Documentation/yugabytedb.md) to get started with YugabyteDB.
+- Git tags can be added for alpha, beta, or rc releases. For example: v1.1.0-alpha.0
+- Added `deviceClass` to the per OSD device specific `config` section for setting custom crush device class per OSD.
+- Use `--db-devices` with Ceph 14.2.1 and newer clusters to explicitly set `metadataDevice` per OSD.
 
 ### Ceph
 
@@ -43,6 +47,19 @@ an example usage
 - Ceph monitors have initial support for running on PVC storage. See docs on
   [monitor settings for more detail](Documentation/ceph-cluster-crd.md#mon-settings).
 - Ceph OSDs can be created by using StorageClassDeviceSet. See docs on [Storage Class Device Sets](Documentation/ceph-cluster-crd.md#storage-class-device-sets).
+- Rook can now connect to an external cluster, for more info about external cluster [read the design](https://github.com/rook/rook/blob/master/design/ceph-external-cluster.md) as well as the documentation [Ceph External cluster](Documentation/ceph-cluster-crd.md#external-cluster)
+- Added a new property in `storageClassDeviceSets` named `portable`:
+   - If `true`, the OSDs will be allowed to move between nodes during failover. This requires a storage class that supports portability (e.g. `aws-ebs`, but not the local storage provisioner).
+   - If `false`, the OSDs will be assigned to a node permanently. Rook will configure Ceph's CRUSH map to support the portability.
+- The Ceph cluster custom resource now contains a `configOverrides` section where users can specify
+  configuration changes to Ceph which Rook should apply.
+- Rook can now manage PodDisruptionBudgets for the following Daemons: OSD, Mon, RGW, MDS. OSD budgets are dynamically managed as documented in the [design](https://github.com/rook/rook/blob/master/design/ceph-managed-disruptionbudgets.md). This can be enabled with the `managePodBudgets` flag in the cluster CR. When this is enabled, drains on OSDs will be blocked by default and dynamically unblocked in a safe manner one failureDomain at a time. When a failure domain is draining, it will be marked as no out for a longer time than the default DOWN/OUT interval.
+
+### YugabyteDB
+
+- Rook now supports YugabyteDB as storage provider. YugaByteDB is a high-performance, cloud-native distributed SQL database which can tolerate disk, node, zone and region failures automatically. You can find more information about YugabyteDB [here](https://docs.yugabyte.com/latest/introduction/)
+- Newly added Rook operator for YugabyteDB lets you easily create a YugabyteDB cluster.
+- Please follow Rook YugabyteDB operator [quickstart guide](Documentation/yugabytedb.md) to create a simple YugabyteDB cluster.
 
 ## Breaking Changes
 
@@ -51,6 +68,8 @@ an example usage
 - The minimum version supported by Rook is Ceph Mimic v13.2.4. Before upgrading to v1.1 it is required to update the version of Ceph to at least this version.
 - The CSI driver is enabled by default. Documentation has been changed significantly for block and filesystem to use the CSI driver instead of flex.
 While the flex driver is still supported, it is anticipated to be deprecated soon.
+- The `Mon.PreferredCount` setting has been removed.
+- imagePullSecrets option added to helm-chart
 
 ## Known Issues
 

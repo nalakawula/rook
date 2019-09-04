@@ -63,7 +63,7 @@ type Cluster struct {
 	annotations     rookalpha.Annotations
 	context         *clusterd.Context
 	dataDir         string
-	HostNetwork     bool
+	Network         cephv1.NetworkSpec
 	resources       v1.ResourceRequirements
 	ownerRef        metav1.OwnerReference
 	dashboard       cephv1.DashboardSpec
@@ -72,6 +72,7 @@ type Cluster struct {
 	rookVersion     string
 	exitCode        func(err error) (int, bool)
 	dataDirHostPath string
+	isUpgrade       bool
 }
 
 // New creates an instance of the mgr
@@ -82,12 +83,13 @@ func New(
 	cephVersion cephv1.CephVersionSpec,
 	placement rookalpha.Placement,
 	annotations rookalpha.Annotations,
-	hostNetwork bool,
+	network cephv1.NetworkSpec,
 	dashboard cephv1.DashboardSpec,
 	monitoringSpec cephv1.MonitoringSpec,
 	resources v1.ResourceRequirements,
 	ownerRef metav1.OwnerReference,
 	dataDirHostPath string,
+	isUpgrade bool,
 ) *Cluster {
 	return &Cluster{
 		clusterInfo:     clusterInfo,
@@ -100,11 +102,12 @@ func New(
 		dataDir:         k8sutil.DataDir,
 		dashboard:       dashboard,
 		monitoringSpec:  monitoringSpec,
-		HostNetwork:     hostNetwork,
+		Network:         network,
 		resources:       resources,
 		ownerRef:        ownerRef,
 		exitCode:        getExitCode,
 		dataDirHostPath: dataDirHostPath,
+		isUpgrade:       isUpgrade,
 	}
 }
 
@@ -156,16 +159,21 @@ func (c *Cluster) Start() error {
 			// Always invoke ceph version before an upgrade so we are sure to be up-to-date
 			daemon := string(config.MgrType)
 			var cephVersionToUse cephver.CephVersion
-			currentCephVersion, err := client.LeastUptodateDaemonVersion(c.context, c.clusterInfo.Name, daemon)
-			if err != nil {
-				logger.Warningf("failed to retrieve current ceph %s version. %+v", daemon, err)
-				logger.Debug("could not detect ceph version during update, this is likely an initial bootstrap, proceeding with c.clusterInfo.CephVersion")
-				cephVersionToUse = c.clusterInfo.CephVersion
-			} else {
-				logger.Debugf("current cluster version for mgrs before upgrading is: %+v", currentCephVersion)
-				cephVersionToUse = currentCephVersion
+
+			// If this is not an upgrade there is no need to check the ceph version
+			if c.isUpgrade {
+				currentCephVersion, err := client.LeastUptodateDaemonVersion(c.context, c.clusterInfo.Name, daemon)
+				if err != nil {
+					logger.Warningf("failed to retrieve current ceph %s version. %+v", daemon, err)
+					logger.Debug("could not detect ceph version during update, this is likely an initial bootstrap, proceeding with c.clusterInfo.CephVersion")
+					cephVersionToUse = c.clusterInfo.CephVersion
+				} else {
+					logger.Debugf("current cluster version for mgrs before upgrading is: %+v", currentCephVersion)
+					cephVersionToUse = currentCephVersion
+				}
 			}
-			if err := updateDeploymentAndWait(c.context, d, c.Namespace, daemon, mgrConfig.DaemonID, cephVersionToUse); err != nil {
+
+			if err := updateDeploymentAndWait(c.context, d, c.Namespace, daemon, mgrConfig.DaemonID, cephVersionToUse, c.isUpgrade); err != nil {
 				return fmt.Errorf("failed to update mgr deployment %s. %+v", resourceName, err)
 			}
 		}

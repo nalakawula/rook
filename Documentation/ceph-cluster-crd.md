@@ -31,7 +31,7 @@ metadata:
 spec:
   cephVersion:
     # see the "Cluster Settings" section below for more details on which image of ceph to run
-    image: ceph/ceph:v14.2.2-20190722
+    image: ceph/ceph:v14.2.2-20190826
   dataDirHostPath: /var/lib/rook
   mon:
     count: 3
@@ -63,6 +63,7 @@ spec:
    storageClassDeviceSets:
     - name: set1
       count: 3
+      portable: false
       volumeClaimTemplates:
       - metadata:
           name: data
@@ -87,8 +88,10 @@ Settings can be specified at the global level to apply to the cluster as a whole
 
 ### Cluster Settings
 
+- `external`:
+  - `enable`: if `true`, the cluster will not be managed by Rook but via an external entity. This mode is intended to connect to an existing cluster. In this case, Rook will only consume the external cluster. However, Rook will be able to deploy various daemons in Kubernetes such as object gateways, mds and nfs. If this setting is enabled **all** the other options will be ignored except `cephVersion.image` and `dataDirHostPath`. See [external cluster configuration](#external-cluster).
 - `cephVersion`: The version information for launching the ceph daemons.
-  - `image`: The image used for running the ceph daemons. For example, `ceph/ceph:v13.2.6-20190604` or `ceph/ceph:v14.2.2-20190722`.
+  - `image`: The image used for running the ceph daemons. For example, `ceph/ceph:v13.2.6-20190604` or `ceph/ceph:v14.2.2-20190826`.
   For the latest ceph images, see the [Ceph DockerHub](https://hub.docker.com/r/ceph/ceph/tags/).
   To ensure a consistent version of the image is running across all nodes in the cluster, it is recommended to use a very specific image version.
   Tags also exist that would give the latest version, but they are only recommended for test environments. For example, the tag `v14` will be updated each time a new nautilus build is released.
@@ -124,14 +127,13 @@ For more details on the mons and when to choose a number other than `3`, see the
   - `config`: Config settings applied to all OSDs on the node unless overridden by `devices` or `directories`. See the [config settings](#osd-configuration-settings) below.
   - [storage selection settings](#storage-selection-settings)
   - [Storage Class Device Sets](#storage-class-device-sets)
+- `disruptionManagement`: The section for configuring management of daemon disruptions
+  - `managePodBudgets`: if `true`, the operator will create and manage PodDsruptionBudgets for OSD, Mon, RGW, and MDS daemons. OSD PDBs are managed dynamically via the strategy outlined in the [design](https://github.com/rook/rook/blob/master/design/ceph-managed-disruptionbudgets.md). The operator will block eviction of OSDs by default and unblock them safely when drains are detected.
+  - `osdMaintenanceTimeout`: is a duration in minutes that determines how long an entire failureDomain like `region/zone/host` will be held in `noout` (in addition to the default DOWN/OUT interval) when it is draining. This is only relevant when  `managePodBudgets` is `true`. The default value is `30` minutes.
 
 ### Mon Settings
 
 - `count`: Set the number of mons to be started. The number should be odd and between `1` and `9`. If not specified the default is set to `3` and `allowMultiplePerNode` is also set to `true`.
-- `preferredCount`: If you want to increase the number of mons when the number of nodes increases, set the `preferredCount` to be larger than the `count`. For example, if your cluster
-starts with three nodes, but might grow to more than five nodes, you might want five mons running after the other nodes come online. In this case, set `count: 3` and `preferredCount: 5`.
-When the operator sees the new nodes come online, the number of mons will increase to the preferred count. If the number of nodes decreases below the `preferredCount`, the operator will
-reduce the number of mons back to `count`. If `allowMultiplePerNode: true` (for testing scenarios), the number of mons will always use `preferredCount` if set.
 - `allowMultiplePerNode`: Enable (`true`) or disable (`false`) the placement of multiple mons on one node. Default is `false`.
 - `volumeClaimTemplate`: A `PersistentVolumeSpec` used by Rook to create PVCs
   for monitor storage. This field is optional, and when not provided, HostPath
@@ -205,6 +207,7 @@ The following are the settings for Storage Class Device Sets which can be config
 - `count`: The number of devices in the set.
 - `resources`: The CPU and RAM requests/limits for the devices.(Optional)
 - `placement`: The placement criteria for the devices. Default is no placement criteria.(Optional)
+- `portable`: If `true`, the OSDs will be allowed to move between nodes during failover. This requires a storage class that supports portability (e.g. `aws-ebs`, but not the local storage provisioner). If `false`, the OSDs will be assigned to a node permanently. Rook will configure Ceph's CRUSH map to support the portability.
 - `volumeClaimTemplates`: A list of PVC templates to use for provisioning the underlying storage devices.
   - `resources.requests.storage`: The desired capacity for the underlying storage devices.
   - `storageClassName`: The StorageClass to provision PVCs from. Default would be to use the cluster-default StorageClass.
@@ -286,6 +289,62 @@ For more information on resource requests/limits see the official Kubernetes doc
   - `cpu`: Limit for CPU (example: one CPU core `1`, 50% of one CPU core `500m`).
   - `memory`: Limit for Memory (example: one gigabyte of memory `1Gi`, half a gigabyte of memory `512Mi`).
 
+### Ceph config overrides
+Users are advised to use Ceph's CLI or dashboard to configure Ceph; however, some users may want to
+specify some settings they want set in the `CephCluster` manifest. This is possible using the
+`configOverrides` section. Config overrides follow the same syntax as [Ceph's documentation for
+setting config values](https://docs.ceph.com/docs/master/rados/configuration/ceph-conf/#commands),
+and configuration is stored in Ceph's centralized configuration database.
+
+Each item in `configOverrides` has `who`, `option`, and `value` properties. `who` can be `global` to
+affect all Ceph daemons, a daemon type, an individual Ceph daemon, or a glob matching multiple
+daemons. It may also use a
+[mask](https://docs.ceph.com/docs/master/rados/configuration/ceph-conf/#sections-and-masks).
+`option` is the configuration option to be overridden, and `value` is the value to set on the
+configuration option. All properties are strings.
+
+Rook will only set configuration overrides once when an orchestration is run. For example, on node
+addition or removal, when disks change on a node, or when the operator starts (or restarts). This
+means that users can change Ceph's configuration from the CLI or dashboard as desired without Rook
+constantly fighting to control the setting. This is particularly valuable in situations where values
+need to be changed to debug errors or test changes to tuning parameters.
+
+**WARNING:** Remember that Rook will set these overrides any time the operator restarts, so user
+changes via Ceph's CLI or dashboard to values set here will not persist forever.
+
+Some examples:
+```yaml
+  configOverrides:
+    - who: global
+      option: log_file
+      value: /var/log/custom-log-dir
+    - who: mon
+      option: mon_compact_on_start
+      value: "true"
+    - who: mgr.a
+      option: mgr_stats_period
+      value: "10"
+    - who: osd.*
+      option: osd_memory_target
+      value: "2147483648"
+    - who: osd/rack:foo
+      option: debug_ms
+      value: "20"
+```
+
+#### Advanced config
+Setting configs in the Ceph mons' centralized database this way requires that at least one mon be
+available for the configs to be set. Ceph may also have a small number of very advanced settings
+that aren't able to be modified easily in the configuration database. In order to set configurations
+before monitors are available or to set problematic configuration settings, the
+`rook-config-override` ConfigMap exists, and the `config` field can be set with the contents of a
+`ceph.conf` file. It is highly recommended that this only be used when absolutely necessary and that
+the `config` be reset to an empty string if/when the configurations are no longer necessary, as this
+will make the Ceph cluster less configurable from the CLI and dashboard and may make future tuning
+or debugging difficult. Read more about this in the
+[advanced configuration docs](ceph-advanced-configuration.md#custom-cephconf-settings).
+
+
 ## Samples
 Here are several samples for configuring Ceph clusters. Each of the samples must also include the namespace and corresponding access granted for management by the Ceph operator. See the [common cluster resources](#common-cluster-resources) below.
 
@@ -298,7 +357,7 @@ metadata:
   namespace: rook-ceph
 spec:
   cephVersion:
-    image: ceph/ceph:v14.2.2-20190722
+    image: ceph/ceph:v14.2.2-20190826
   dataDirHostPath: /var/lib/rook
   mon:
     count: 3
@@ -330,7 +389,7 @@ metadata:
   namespace: rook-ceph
 spec:
   cephVersion:
-    image: ceph/ceph:v14.2.2-20190722
+    image: ceph/ceph:v14.2.2-20190826
   dataDirHostPath: /var/lib/rook
   mon:
     count: 3
@@ -373,7 +432,7 @@ metadata:
   namespace: rook-ceph
 spec:
   cephVersion:
-    image: ceph/ceph:v14.2.2-20190722
+    image: ceph/ceph:v14.2.2-20190826
   dataDirHostPath: /var/lib/rook
   mon:
     count: 3
@@ -410,7 +469,7 @@ metadata:
   namespace: rook-ceph
 spec:
   cephVersion:
-    image: ceph/ceph:v14.2.2-20190722
+    image: ceph/ceph:v14.2.2-20190826
   dataDirHostPath: /var/lib/rook
   mon:
     count: 3
@@ -456,7 +515,7 @@ metadata:
   namespace: rook-ceph
 spec:
   cephVersion:
-    image: ceph/ceph:v14.2.2-20190722
+    image: ceph/ceph:v14.2.2-20190826
   dataDirHostPath: /var/lib/rook
   mon:
     count: 3
@@ -494,7 +553,7 @@ metadata:
   namespace: rook-ceph
 spec:
   cephVersion:
-    image: ceph/ceph:v14.2.2-20190722
+    image: ceph/ceph:v14.2.2-20190826
   dataDirHostPath: /var/lib/rook
   mon:
     count: 3
@@ -558,7 +617,7 @@ metadata:
   namespace: rook-ceph
 spec:
   cephVersion:
-    image: ceph/ceph:v14.2.2-20190722
+    image: ceph/ceph:v14.2.2-20190826
   dataDirHostPath: /var/lib/rook
   mon:
     count: 3
@@ -605,7 +664,7 @@ spec:
           requests:
             storage: 10Gi
   cephVersion:
-    image: ceph/ceph:v14.2.2-20190722
+    image: ceph/ceph:v14.2.2-20190826
     allowUnsupported: false
   dashboard:
     enabled: true
@@ -615,6 +674,7 @@ spec:
     storageClassDeviceSets:
     - name: set1
       count: 3
+      portable: false
       resources:
         limits:
           cpu: "500m"
@@ -646,3 +706,63 @@ spec:
           accessModes:
             - ReadWriteOnce
 ```
+
+### External cluster
+
+#### Pre-requisites
+
+In order to configure an external Ceph cluster with Rook, we need to inject some information in order to connect to that cluster.
+You can use the `cluster/examples/kubernetes/ceph/import-external-cluster.sh` script to achieve that.
+The script will look for the following populated environment variables:
+
+* `NAMESPACE`: the namespace where the configmap and secrets should be injected
+* `ROOK_EXTERNAL_FSID`: the fsid of the external Ceph cluster, it can be retrieved via the `ceph fsid` command
+* `ROOK_EXTERNAL_ADMIN_SECRET`: the external Ceph cluster admin secret key, it can be retrieved via the `ceph auth get-key client.admin` command
+* `ROOK_EXTERNAL_CEPH_MON_DATA`: is a common-separated list of running monitors IP address along with their ports, e.g: `a=172.17.0.4:6789,b=172.17.0.5:6789,c=172.17.0.6:6789`. You don't need to specify all the monitors, you can simply pass one and the Operator will discover the rest. The name of the monitor is the name that appears in the `ceph status` ouput.
+
+Example:
+
+```bash
+export NAMESPACE=rook-ceph-external
+export ROOK_EXTERNAL_FSID=3240b4aa-ddbc-42ee-98ba-4ea7b2a61514
+export ROOK_EXTERNAL_ADMIN_SECRET=AQC6Ylxdja+NDBAAB7qy9MEAr4VLLq4dCIvxtg==
+export ROOK_EXTERNAL_CEPH_MON_DATA=a=172.17.0.4:6789
+```
+
+Then you can simply execute the script like this:
+
+```bash
+bash cluster/examples/kubernetes/ceph/import-external-cluster.sh
+```
+
+#### CR example
+
+Assuming the above section has successfully completed, here is a CR example:
+
+```
+apiVersion: ceph.rook.io/v1
+kind: CephCluster
+metadata:
+  name: rook-ceph-external
+  namespace: rook-ceph-external
+spec:
+  external:
+    enable: true
+  dataDirHostPath: /var/lib/rook
+  cephVersion:
+    image: ceph/ceph:v14.2.2-20190826 # the image version **must** match the version of the external Ceph cluster
+```
+
+Choose the namespace carefully, if you have an existing cluster managed by Rook, you have likely already injected `common.yaml`.
+Additionnally, you now need to inject `common-external.yaml` too.
+
+You can now create it like this:
+
+```bash
+kubectl create -f cluster/examples/kubernetes/ceph/cluster-external.yaml
+```
+
+If the previous section has not been completed, the Rook Operator will still acknowledge the CR creation but will wait forever to receive connection information.
+
+**WARNING**
+If no cluster is managed by the current Rook Operator, you need to inject `common.yaml`, then modify `cluster-external.yaml` and specify `rook-ceph` as `namespace`.

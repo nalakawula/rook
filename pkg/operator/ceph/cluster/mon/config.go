@@ -54,8 +54,8 @@ const (
 func (c *Cluster) genMonSharedKeyring() string {
 	return fmt.Sprintf(
 		keyringTemplate,
-		c.clusterInfo.MonitorSecret,
-		cephconfig.AdminKeyring(c.clusterInfo),
+		c.ClusterInfo.MonitorSecret,
+		cephconfig.AdminKeyring(c.ClusterInfo),
 	)
 }
 
@@ -81,10 +81,9 @@ func CreateOrLoadClusterInfo(context *clusterd.Context, namespace string, ownerR
 	maxMonID := -1
 	monMapping := &Mapping{
 		Node: map[string]*NodeInfo{},
-		Port: map[string]int32{},
 	}
 
-	secrets, err := context.Clientset.CoreV1().Secrets(namespace).Get(appName, metav1.GetOptions{})
+	secrets, err := context.Clientset.CoreV1().Secrets(namespace).Get(AppName, metav1.GetOptions{})
 	if err != nil {
 		if !errors.IsNotFound(err) {
 			return nil, maxMonID, monMapping, fmt.Errorf("failed to get mon secrets. %+v", err)
@@ -124,7 +123,7 @@ func CreateOrLoadClusterInfo(context *clusterd.Context, namespace string, ownerR
 // WriteConnectionConfig save monitor connection config to disk
 func WriteConnectionConfig(context *clusterd.Context, clusterInfo *cephconfig.ClusterInfo) error {
 	// write the latest config to the config dir
-	if err := cephconfig.GenerateAdminConnectionConfig(context, clusterInfo); err != nil {
+	if _, err := cephconfig.GenerateAdminConnectionConfig(context, clusterInfo); err != nil {
 		return fmt.Errorf("failed to write connection config. %+v", err)
 	}
 
@@ -137,7 +136,6 @@ func loadMonConfig(clientset kubernetes.Interface, namespace string) (map[string
 	maxMonID := -1
 	monMapping := &Mapping{
 		Node: map[string]*NodeInfo{},
-		Port: map[string]int32{},
 	}
 
 	cm, err := clientset.CoreV1().ConfigMaps(namespace).Get(EndpointConfigMapName, metav1.GetOptions{})
@@ -216,7 +214,7 @@ func createClusterAccessSecret(clientset kubernetes.Interface, namespace string,
 	}
 	secret := &v1.Secret{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      appName,
+			Name:      AppName,
 			Namespace: namespace,
 		},
 		Data: secrets,

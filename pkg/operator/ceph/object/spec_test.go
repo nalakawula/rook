@@ -52,8 +52,12 @@ func TestPodSpecs(t *testing.T) {
 		clusterInfo: info,
 		store:       store,
 		rookVersion: "rook/rook:myversion",
-		cephVersion: cephv1.CephVersionSpec{Image: "ceph/ceph:v13.2.1"},
-		hostNetwork: true,
+		clusterSpec: &cephv1.ClusterSpec{
+			CephVersion: cephv1.CephVersionSpec{Image: "ceph/ceph:v13.2.1"},
+			Network: cephv1.NetworkSpec{
+				HostNetwork: true,
+			},
+		},
 		DataPathMap: data,
 	}
 
@@ -91,11 +95,14 @@ func TestSSLPodSpec(t *testing.T) {
 		clusterInfo: info,
 		store:       store,
 		rookVersion: "rook/rook:myversion",
-		cephVersion: cephv1.CephVersionSpec{Image: "ceph/ceph:v13.2.1"},
-		hostNetwork: true,
+		clusterSpec: &cephv1.ClusterSpec{
+			CephVersion: cephv1.CephVersionSpec{Image: "ceph/ceph:v13.2.1"},
+			Network: cephv1.NetworkSpec{
+				HostNetwork: true,
+			},
+		},
 		DataPathMap: data,
 	}
-	c.hostNetwork = true
 
 	resourceName := fmt.Sprintf("%s-%s", AppName, c.store.Name)
 	rgwConfig := &rgwConfig{

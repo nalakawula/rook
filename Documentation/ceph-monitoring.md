@@ -86,7 +86,7 @@ To enable prometheus alerts,
 first, create the RBAC rules to enable monitoring,
 ```BASH
 kubectl create -f cluster/examples/kubernetes/ceph/monitoring/rbac.yaml
-``` 
+```
 then, make following changes to `cluster.yaml` and deploy.
 ```YAML
 monitoring:
@@ -125,3 +125,14 @@ Then the rest of the instructions in the [Prometheus Operator docs](https://gith
 ### Tectonic Bare Metal
 Tectonic strongly discourages the `tectonic-system` Prometheus instance to be used outside their intentions, so you need to create a new [Prometheus Operator](https://coreos.com/operators/prometheus/docs/latest/) yourself.
 After this you only need to create the service monitor as stated above.
+
+### CSI Liveness
+
+To integrate CSI liveness and grpc into ceph monitoring we will need to deploy
+a service and service monitor.
+
+```bash
+kubectl create -f csi-metrics-service-monitor.yaml
+```
+
+This will create the service monitor to have promethues monitor CSI

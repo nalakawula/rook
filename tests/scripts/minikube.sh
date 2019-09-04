@@ -95,7 +95,8 @@ function copy_images() {
     if [[ "$1" == "" || "$1" == "ceph" ]]; then
       echo "copying ceph images"
       copy_image_to_cluster "${BUILD_REGISTRY}/ceph-amd64" rook/ceph:master
-      copy_image_to_cluster ceph/ceph:v13 ceph/ceph:v13
+      # uncomment to push the nautilus image when needed
+      #copy_image_to_cluster ceph/ceph:v14 ceph/ceph:v14
     fi
 
     if [[ "$1" == "" || "$1" == "cockroachdb" ]]; then
@@ -117,6 +118,11 @@ function copy_images() {
         echo "copying nfs image"
         copy_image_to_cluster "${BUILD_REGISTRY}/nfs-amd64" rook/nfs:master
     fi
+
+    if [[ "$1" == "" || "$1" == "yugabytedb" ]]; then
+      echo "copying yugabytedb image"
+      copy_image_to_cluster "${BUILD_REGISTRY}/yugabytedb-amd64" rook/yugabytedb:master
+    fi
 }
 
 # configure minikube
@@ -133,15 +139,10 @@ fi
 case "${1:-}" in
   up)
     echo "starting minikube with kubeadm bootstrapper"
-    minikube start --memory="${MEMORY}" -b kubeadm
-
-    # or start a specific version of K8s
-    #minikube start --memory="${MEMORY}" -b kubeadm --kubernetes-version "v1.15.1"
-
+    minikube start --memory="${MEMORY}" -b kubeadm --vm-driver="${VM_DRIVER}"
     wait_for_ssh
     # create a link so the default dataDirHostPath will work for this environment
-    minikube ssh "sudo mkdir -p /mnt/${DISK}/${PWD}; sudo mkdir -p $(dirname $PWD); sudo ln -s /mnt/${DISK}/${PWD} $(dirname $PWD)/"
-    minikube ssh "sudo mkdir -p /mnt/${DISK}/var/lib/rook;sudo ln -s /mnt/${DISK}/var/lib/rook /var/lib/rook"
+    minikube ssh "sudo mkdir -p /mnt/${DISK}/rook/ && sudo ln -sf /mnt/${DISK}/rook/ /var/lib/"
     copy_images "$2"
     ;;
   down)
@@ -185,11 +186,11 @@ case "${1:-}" in
     ;;
   *)
     echo "usage:" >&2
-    echo "  $0 up [ceph | cockroachdb | cassandra | minio | nfs]" >&2
+    echo "  $0 up [ceph | cockroachdb | cassandra | minio | nfs | yugabytedb]" >&2
     echo "  $0 down" >&2
     echo "  $0 clean" >&2
     echo "  $0 ssh" >&2
-    echo "  $0 update [ceph | cockroachdb | cassandra | minio | nfs]" >&2
+    echo "  $0 update [ceph | cockroachdb | cassandra | minio | nfs | yugabytedb]" >&2
     echo "  $0 restart <pod-name-regex> (the pod name is a regex to match e.g. restart ^rook-ceph-osd)" >&2
     echo "  $0 wordpress" >&2
     echo "  $0 cockroachdb-loadgen" >&2

@@ -25,6 +25,7 @@ import (
 	"strconv"
 	"strings"
 
+	cephv1 "github.com/rook/rook/pkg/apis/ceph.rook.io/v1"
 	rookalpha "github.com/rook/rook/pkg/apis/rook.io/v1alpha2"
 	opmon "github.com/rook/rook/pkg/operator/ceph/cluster/mon"
 	"github.com/rook/rook/pkg/operator/ceph/cluster/osd/config"
@@ -68,9 +69,7 @@ func (c *Cluster) makeJob(osdProps osdProperties) (*batch.Job, error) {
 	if osdProps.pvc.ClaimName == "" {
 		podSpec.Spec.NodeSelector = map[string]string{v1.LabelHostname: osdProps.crushHostname}
 	} else {
-		podSpec.Spec.InitContainers = []v1.Container{
-			c.getPVCInitContainer(osdProps.pvc),
-		}
+		podSpec.Spec.InitContainers = append(podSpec.Spec.InitContainers, c.getPVCInitContainer(osdProps.pvc))
 	}
 
 	job := &batch.Job{
@@ -100,9 +99,10 @@ func (c *Cluster) makeJob(osdProps osdProperties) (*batch.Job, error) {
 func (c *Cluster) makeDeployment(osdProps osdProperties, osd OSDInfo) (*apps.Deployment, error) {
 
 	replicaCount := int32(1)
-	volumeMounts := opspec.CephVolumeMounts()
-	configVolumeMounts := opspec.RookVolumeMounts()
-	volumes := opspec.PodVolumes(c.dataDirHostPath, c.Namespace)
+	volumeMounts := opspec.CephVolumeMounts(false)
+	configVolumeMounts := opspec.RookVolumeMounts(false)
+	volumes := opspec.PodVolumes(c.dataDirHostPath, c.Namespace, false)
+	failureDomainValue := osdProps.crushHostname
 
 	var dataDir string
 	if osd.IsDirectory {
@@ -197,7 +197,7 @@ func (c *Cluster) makeDeployment(osdProps osdProperties, osd OSDInfo) (*apps.Dep
 		commonArgs = append(commonArgs, "--default-log-to-file", "false")
 	}
 
-	commonArgs = append(commonArgs, osdOnSDNFlag(c.HostNetwork, c.clusterInfo.CephVersion)...)
+	commonArgs = append(commonArgs, osdOnSDNFlag(c.Network, c.clusterInfo.CephVersion)...)
 
 	// Add the volume to the spec and the mount to the daemon container
 	copyBinariesVolume, copyBinariesContainer := c.getCopyBinariesContainer()
@@ -278,7 +278,7 @@ func (c *Cluster) makeDeployment(osdProps osdProperties, osd OSDInfo) (*apps.Dep
 	hostIPC := osdProps.storeConfig.EncryptedDevice
 
 	DNSPolicy := v1.DNSClusterFirst
-	if c.HostNetwork {
+	if c.Network.IsHost() {
 		DNSPolicy = v1.DNSClusterFirstWithHostNet
 	}
 
@@ -286,18 +286,14 @@ func (c *Cluster) makeDeployment(osdProps osdProperties, osd OSDInfo) (*apps.Dep
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      fmt.Sprintf(osdAppNameFmt, osd.ID),
 			Namespace: c.Namespace,
-			Labels: map[string]string{
-				k8sutil.AppAttr:     appName,
-				k8sutil.ClusterAttr: c.Namespace,
-				osdLabelKey:         fmt.Sprintf("%d", osd.ID),
-			},
+			Labels:    c.getOSDLabels(osd.ID, failureDomainValue, osdProps.portable),
 		},
 		Spec: apps.DeploymentSpec{
 			Selector: &metav1.LabelSelector{
 				MatchLabels: map[string]string{
-					k8sutil.AppAttr:     appName,
+					k8sutil.AppAttr:     AppName,
 					k8sutil.ClusterAttr: c.Namespace,
-					osdLabelKey:         fmt.Sprintf("%d", osd.ID),
+					OsdIdLabelKey:       fmt.Sprintf("%d", osd.ID),
 				},
 			},
 			Strategy: apps.DeploymentStrategy{
@@ -305,17 +301,13 @@ func (c *Cluster) makeDeployment(osdProps osdProperties, osd OSDInfo) (*apps.Dep
 			},
 			Template: v1.PodTemplateSpec{
 				ObjectMeta: metav1.ObjectMeta{
-					Name: appName,
-					Labels: map[string]string{
-						k8sutil.AppAttr:     appName,
-						k8sutil.ClusterAttr: c.Namespace,
-						osdLabelKey:         fmt.Sprintf("%d", osd.ID),
-					},
+					Name:   AppName,
+					Labels: c.getOSDLabels(osd.ID, failureDomainValue, osdProps.portable),
 				},
 				Spec: v1.PodSpec{
 					RestartPolicy:      v1.RestartPolicyAlways,
 					ServiceAccountName: serviceAccountName,
-					HostNetwork:        c.HostNetwork,
+					HostNetwork:        c.Network.IsHost(),
 					HostPID:            true,
 					HostIPC:            hostIPC,
 					DNSPolicy:          DNSPolicy,
@@ -349,19 +341,26 @@ func (c *Cluster) makeDeployment(osdProps osdProperties, osd OSDInfo) (*apps.Dep
 			Replicas: &replicaCount,
 		},
 	}
-	if osdProps.pvc.ClaimName == "" {
-		deployment.Spec.Template.Spec.NodeSelector = map[string]string{v1.LabelHostname: osdProps.crushHostname}
-	} else {
+	if osdProps.pvc.ClaimName != "" {
 		deployment.Spec.Template.Spec.InitContainers = append(deployment.Spec.Template.Spec.InitContainers, c.getPVCInitContainer(osdProps.pvc))
 		k8sutil.AddLabelToDeployement(OSDOverPVCLabelKey, osdProps.pvc.ClaimName, deployment)
+		k8sutil.AddLabelToPod(OSDOverPVCLabelKey, osdProps.pvc.ClaimName, &deployment.Spec.Template)
 	}
+	if !osdProps.portable {
+		deployment.Spec.Template.Spec.NodeSelector = map[string]string{v1.LabelHostname: osdProps.crushHostname}
+	}
+
 	k8sutil.AddRookVersionLabelToDeployment(deployment)
 	c.annotations.ApplyToObjectMeta(&deployment.ObjectMeta)
 	c.annotations.ApplyToObjectMeta(&deployment.Spec.Template.ObjectMeta)
 	opspec.AddCephVersionLabelToDeployment(c.clusterInfo.CephVersion, deployment)
 	opspec.AddCephVersionLabelToDeployment(c.clusterInfo.CephVersion, deployment)
 	k8sutil.SetOwnerRef(&deployment.ObjectMeta, &c.ownerRef)
-	c.placement.ApplyToPodSpec(&deployment.Spec.Template.Spec)
+	if len(osdProps.pvc.ClaimName) == 0 {
+		c.placement.ApplyToPodSpec(&deployment.Spec.Template.Spec)
+	} else {
+		osdProps.placement.ApplyToPodSpec(&deployment.Spec.Template.Spec)
+	}
 	return deployment, nil
 }
 
@@ -386,7 +385,9 @@ func (c *Cluster) provisionPodTemplateSpec(osdProps osdProperties, restart v1.Re
 
 	copyBinariesVolume, copyBinariesContainer := c.getCopyBinariesContainer()
 
-	volumes := append(opspec.PodVolumes(c.dataDirHostPath, c.Namespace), copyBinariesVolume)
+	// ceph-volume is currently set up to use /etc/ceph/ceph.conf; this means no user config
+	// overrides will apply to ceph-volume, but this is unnecessary anyway
+	volumes := append(opspec.PodVolumes(c.dataDirHostPath, c.Namespace, true), copyBinariesVolume)
 
 	// by default, don't define any volume config unless it is required
 	if len(osdProps.devices) > 0 || osdProps.selection.DeviceFilter != "" || osdProps.selection.GetUseAllDevices() || osdProps.metadataDevice != "" {
@@ -421,24 +422,31 @@ func (c *Cluster) provisionPodTemplateSpec(osdProps osdProperties, restart v1.Re
 
 	podSpec := v1.PodSpec{
 		ServiceAccountName: serviceAccountName,
-		Containers: []v1.Container{
+		InitContainers: []v1.Container{
 			*copyBinariesContainer,
+		},
+		Containers: []v1.Container{
 			c.provisionOSDContainer(osdProps, copyBinariesContainer.VolumeMounts[0]),
 		},
 		RestartPolicy: restart,
 		Volumes:       volumes,
-		HostNetwork:   c.HostNetwork,
+		HostNetwork:   c.Network.IsHost(),
 	}
-	if c.HostNetwork {
+	if c.Network.IsHost() {
 		podSpec.DNSPolicy = v1.DNSClusterFirstWithHostNet
 	}
-	c.placement.ApplyToPodSpec(&podSpec)
+	if len(osdProps.pvc.ClaimName) == 0 {
+		c.placement.ApplyToPodSpec(&podSpec)
+	} else {
+		osdProps.placement.ApplyToPodSpec(&podSpec)
+	}
 
 	podMeta := metav1.ObjectMeta{
-		Name: appName,
+		Name: AppName,
 		Labels: map[string]string{
 			k8sutil.AppAttr:     prepareAppName,
 			k8sutil.ClusterAttr: c.Namespace,
+			OSDOverPVCLabelKey:  osdProps.pvc.ClaimName,
 		},
 		Annotations: map[string]string{},
 	}
@@ -541,14 +549,29 @@ func (c *Cluster) provisionOSDContainer(osdProps osdProperties, copyBinariesMoun
 		deviceNames := make([]string, len(osdProps.devices))
 		for i, device := range osdProps.devices {
 			devSuffix := ""
-			count := "1"
 			if count, ok := device.Config[config.OSDsPerDeviceKey]; ok {
 				logger.Infof("%s osds requested on device %s (node %s)", count, device.Name, osdProps.crushHostname)
+				devSuffix += ":" + count
+			} else {
+				devSuffix += ":1"
 			}
-			devSuffix += ":" + count
+			if databaseSizeMB, ok := device.Config[config.DatabaseSizeMBKey]; ok {
+				logger.Infof("osd %s requested with DB size %sMB (node %s)", device.Name, databaseSizeMB, osdProps.crushHostname)
+				devSuffix += ":" + databaseSizeMB
+			} else {
+				devSuffix += ":"
+			}
+			if deviceClass, ok := device.Config[config.DeviceClassKey]; ok {
+				logger.Infof("osd %s requested with deviceClass %s (node %s)", device.Name, deviceClass, osdProps.crushHostname)
+				devSuffix += ":" + deviceClass
+			} else {
+				devSuffix += ":"
+			}
 			if md, ok := device.Config[config.MetadataDeviceKey]; ok {
 				logger.Infof("osd %s requested with metadataDevice %s (node %s)", device.Name, md, osdProps.crushHostname)
 				devSuffix += ":" + md
+			} else {
+				devSuffix += ":"
 			}
 			deviceNames[i] = device.Name + devSuffix
 		}
@@ -561,13 +584,16 @@ func (c *Cluster) provisionOSDContainer(osdProps osdProperties, copyBinariesMoun
 		envVars = append(envVars, deviceFilterEnvVar("all"))
 		devMountNeeded = true
 	}
+	envVars = append(envVars, v1.EnvVar{Name: "ROOK_CEPH_VERSION", Value: c.clusterInfo.CephVersion.CephVersionFormatted()})
 
 	if osdProps.metadataDevice != "" {
 		envVars = append(envVars, metadataDeviceEnvVar(osdProps.metadataDevice))
 		devMountNeeded = true
 	}
 
-	volumeMounts := append(opspec.CephVolumeMounts(), copyBinariesMount)
+	// ceph-volume is currently set up to use /etc/ceph/ceph.conf; this means no user config
+	// overrides will apply to ceph-volume, but this is unnecessary anyway
+	volumeMounts := append(opspec.CephVolumeMounts(true), copyBinariesMount)
 	if devMountNeeded {
 		devMount := v1.VolumeMount{Name: "devices", MountPath: "/dev"}
 		volumeMounts = append(volumeMounts, devMount)
@@ -639,7 +665,7 @@ func (c *Cluster) skipVolumeForDirectory(path string) bool {
 func getPVCOSDVolumes(osdProps *osdProperties) []v1.Volume {
 	return []v1.Volume{
 		{
-			Name: osdProps.crushHostname,
+			Name: osdProps.pvc.ClaimName,
 			VolumeSource: v1.VolumeSource{
 				PersistentVolumeClaim: &osdProps.pvc,
 			},
@@ -724,11 +750,11 @@ func getConfigFromContainer(osdContainer v1.Container) map[string]string {
 	return cfg
 }
 
-func osdOnSDNFlag(hostnetwork bool, v cephver.CephVersion) []string {
+func osdOnSDNFlag(network cephv1.NetworkSpec, v cephver.CephVersion) []string {
 	var args []string
 	// OSD fails to find the right IP to bind to when running on SDN
 	// for more details: https://github.com/rook/rook/issues/3140
-	if !hostnetwork {
+	if !network.IsHost() {
 		if v.IsAtLeast(cephver.CephVersion{Major: 14, Minor: 2, Extra: 2}) {
 			args = append(args, "--ms-learn-addr-from-peer=false")
 		}
@@ -747,5 +773,15 @@ func makeStorageClassDeviceSetPVCLabel(storageClassDeviceSetName, pvcStorageClas
 		CephDeviceSetLabelKey:      storageClassDeviceSetName,
 		CephSetIndexLabelKey:       fmt.Sprintf("%v", setIndex),
 		CephDeviceSetPVCIDLabelKey: pvcStorageClassDeviceSetPVCId,
+	}
+}
+
+func (c *Cluster) getOSDLabels(osdID int, failureDomainValue string, portable bool) map[string]string {
+	return map[string]string{
+		k8sutil.AppAttr:     AppName,
+		k8sutil.ClusterAttr: c.Namespace,
+		OsdIdLabelKey:       fmt.Sprintf("%d", osdID),
+		FailureDomainKey:    failureDomainValue,
+		portableKey:         strconv.FormatBool(portable),
 	}
 }

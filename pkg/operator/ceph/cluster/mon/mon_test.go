@@ -101,10 +101,10 @@ func newTestStartClusterWithQuorumResponse(namespace string, monResponse func() 
 	}
 }
 
-func newCluster(context *clusterd.Context, namespace string, hostNetwork bool, allowMultiplePerNode bool, resources v1.ResourceRequirements) *Cluster {
+func newCluster(context *clusterd.Context, namespace string, network cephv1.NetworkSpec, allowMultiplePerNode bool, resources v1.ResourceRequirements) *Cluster {
 	return &Cluster{
-		clusterInfo: nil,
-		HostNetwork: hostNetwork,
+		ClusterInfo: nil,
+		Network:     network,
 		context:     context,
 		Namespace:   namespace,
 		rookVersion: "myversion",
@@ -122,7 +122,6 @@ func newCluster(context *clusterd.Context, namespace string, hostNetwork bool, a
 		monTimeoutList:      map[string]time.Time{},
 		mapping: &Mapping{
 			Node: map[string]*NodeInfo{},
-			Port: map[string]int32{},
 		},
 		ownerRef: metav1.OwnerReference{},
 	}
@@ -130,7 +129,7 @@ func newCluster(context *clusterd.Context, namespace string, hostNetwork bool, a
 
 // setCommonMonProperties is a convenience helper for setting common test properties
 func setCommonMonProperties(c *Cluster, currentMons int, mon cephv1.MonSpec, rookVersion string) {
-	c.clusterInfo = test.CreateConfigDir(currentMons)
+	c.ClusterInfo = test.CreateConfigDir(currentMons)
 	c.spec.Mon.Count = mon.Count
 	c.spec.Mon.AllowMultiplePerNode = mon.AllowMultiplePerNode
 	c.rookVersion = rookVersion
@@ -146,16 +145,16 @@ func TestStartMonPods(t *testing.T) {
 
 	namespace := "ns"
 	context := newTestStartCluster(namespace)
-	c := newCluster(context, namespace, false, true, v1.ResourceRequirements{})
+	c := newCluster(context, namespace, cephv1.NetworkSpec{}, true, v1.ResourceRequirements{})
 
 	// start a basic cluster
-	_, err := c.Start(c.clusterInfo, c.rookVersion, cephver.Mimic, c.spec)
+	_, err := c.Start(c.ClusterInfo, c.rookVersion, cephver.Mimic, c.spec, false)
 	assert.Nil(t, err)
 
 	validateStart(t, c)
 
 	// starting again should be a no-op, but still results in an error
-	_, err = c.Start(c.clusterInfo, c.rookVersion, cephver.Mimic, c.spec)
+	_, err = c.Start(c.ClusterInfo, c.rookVersion, cephver.Mimic, c.spec, false)
 	assert.Nil(t, err)
 
 	validateStart(t, c)
@@ -165,20 +164,20 @@ func TestOperatorRestart(t *testing.T) {
 
 	namespace := "ns"
 	context := newTestStartCluster(namespace)
-	c := newCluster(context, namespace, false, true, v1.ResourceRequirements{})
-	c.clusterInfo = test.CreateConfigDir(1)
+	c := newCluster(context, namespace, cephv1.NetworkSpec{}, true, v1.ResourceRequirements{})
+	c.ClusterInfo = test.CreateConfigDir(1)
 
 	// start a basic cluster
-	info, err := c.Start(c.clusterInfo, c.rookVersion, cephver.Mimic, c.spec)
+	info, err := c.Start(c.ClusterInfo, c.rookVersion, cephver.Mimic, c.spec, false)
 	assert.Nil(t, err)
 	assert.True(t, info.IsInitialized())
 
 	validateStart(t, c)
 
-	c = newCluster(context, namespace, false, true, v1.ResourceRequirements{})
+	c = newCluster(context, namespace, cephv1.NetworkSpec{}, true, v1.ResourceRequirements{})
 
 	// starting again should be a no-op, but will not result in an error
-	info, err = c.Start(c.clusterInfo, c.rookVersion, cephver.Mimic, c.spec)
+	info, err = c.Start(c.ClusterInfo, c.rookVersion, cephver.Mimic, c.spec, false)
 	assert.Nil(t, err)
 	assert.True(t, info.IsInitialized())
 
@@ -192,21 +191,21 @@ func TestOperatorRestartHostNetwork(t *testing.T) {
 	context := newTestStartCluster(namespace)
 
 	// cluster without host networking
-	c := newCluster(context, namespace, false, false, v1.ResourceRequirements{})
-	c.clusterInfo = test.CreateConfigDir(1)
+	c := newCluster(context, namespace, cephv1.NetworkSpec{}, false, v1.ResourceRequirements{})
+	c.ClusterInfo = test.CreateConfigDir(1)
 
 	// start a basic cluster
-	info, err := c.Start(c.clusterInfo, c.rookVersion, cephver.Mimic, c.spec)
+	info, err := c.Start(c.ClusterInfo, c.rookVersion, cephver.Mimic, c.spec, false)
 	assert.Nil(t, err)
 	assert.True(t, info.IsInitialized())
 
 	validateStart(t, c)
 
 	// cluster with host networking
-	c = newCluster(context, namespace, true, false, v1.ResourceRequirements{})
+	c = newCluster(context, namespace, cephv1.NetworkSpec{HostNetwork: true}, false, v1.ResourceRequirements{})
 
 	// starting again should be a no-op, but still results in an error
-	info, err = c.Start(c.clusterInfo, c.rookVersion, cephver.Mimic, c.spec)
+	info, err = c.Start(c.ClusterInfo, c.rookVersion, cephver.Mimic, c.spec, false)
 	assert.Nil(t, err)
 	assert.True(t, info.IsInitialized(), info)
 
@@ -214,7 +213,7 @@ func TestOperatorRestartHostNetwork(t *testing.T) {
 }
 
 func validateStart(t *testing.T, c *Cluster) {
-	s, err := c.context.Clientset.CoreV1().Secrets(c.Namespace).Get(appName, metav1.GetOptions{})
+	s, err := c.context.Clientset.CoreV1().Secrets(c.Namespace).Get(AppName, metav1.GetOptions{})
 	assert.NoError(t, err) // there shouldn't be an error due the secret existing
 	assert.Equal(t, 4, len(s.Data))
 
@@ -231,7 +230,7 @@ func TestSaveMonEndpoints(t *testing.T) {
 	clientset := test.New(1)
 	configDir, _ := ioutil.TempDir("", "")
 	defer os.RemoveAll(configDir)
-	c := New(&clusterd.Context{Clientset: clientset, ConfigDir: configDir}, "ns", "", false, metav1.OwnerReference{}, &sync.Mutex{})
+	c := New(&clusterd.Context{Clientset: clientset, ConfigDir: configDir}, "ns", "", cephv1.NetworkSpec{}, metav1.OwnerReference{}, &sync.Mutex{}, false)
 	setCommonMonProperties(c, 1, cephv1.MonSpec{Count: 3, AllowMultiplePerNode: true}, "myversion")
 
 	// create the initial config map
@@ -241,25 +240,24 @@ func TestSaveMonEndpoints(t *testing.T) {
 	cm, err := c.context.Clientset.CoreV1().ConfigMaps(c.Namespace).Get(EndpointConfigMapName, metav1.GetOptions{})
 	assert.Nil(t, err)
 	assert.Equal(t, "a=1.2.3.1:6789", cm.Data[EndpointDataKey])
-	assert.Equal(t, `{"node":{},"port":{}}`, cm.Data[MappingKey])
+	assert.Equal(t, `{"node":{}}`, cm.Data[MappingKey])
 	assert.Equal(t, "-1", cm.Data[MaxMonIDKey])
 
 	// update the config map
-	c.clusterInfo.Monitors["a"].Endpoint = "2.3.4.5:6789"
+	c.ClusterInfo.Monitors["a"].Endpoint = "2.3.4.5:6789"
 	c.maxMonID = 2
 	c.mapping.Node["a"] = &NodeInfo{
 		Name:     "node0",
 		Address:  "1.1.1.1",
 		Hostname: "myhost",
 	}
-	c.mapping.Port["node0"] = int32(12345)
 	err = c.saveMonConfig()
 	assert.Nil(t, err)
 
 	cm, err = c.context.Clientset.CoreV1().ConfigMaps(c.Namespace).Get(EndpointConfigMapName, metav1.GetOptions{})
 	assert.Nil(t, err)
 	assert.Equal(t, "a=2.3.4.5:6789", cm.Data[EndpointDataKey])
-	assert.Equal(t, `{"node":{"a":{"Name":"node0","Hostname":"myhost","Address":"1.1.1.1"}},"port":{"node0":12345}}`, cm.Data[MappingKey])
+	assert.Equal(t, `{"node":{"a":{"Name":"node0","Hostname":"myhost","Address":"1.1.1.1"}}}`, cm.Data[MappingKey])
 	assert.Equal(t, "2", cm.Data[MaxMonIDKey])
 }
 
@@ -343,169 +341,4 @@ func TestMonFoundInQuorum(t *testing.T) {
 	assert.True(t, monFoundInQuorum("b", response))
 	assert.True(t, monFoundInQuorum("c", response))
 	assert.False(t, monFoundInQuorum("d", response))
-}
-
-// no node choice can be made when there are no nodes
-func TestScheduleMonitorEmpty(t *testing.T) {
-	nodeZones := [][]NodeUsage{}
-	mon := &monConfig{DaemonName: "a"}
-	// no zones
-	assert.Nil(t, scheduleMonitor(mon, nodeZones))
-	// 1 zone no mons
-	nodeZones = append(nodeZones, []NodeUsage{})
-	assert.Nil(t, scheduleMonitor(mon, nodeZones))
-	// 2 zones no mons
-	nodeZones = append(nodeZones, []NodeUsage{})
-	assert.Nil(t, scheduleMonitor(mon, nodeZones))
-}
-
-// only valid nodes should be chosen
-func TestScheduleMonitorInvalidNodes(t *testing.T) {
-	// 1 zone with 1 invalid empty node
-	nodeZones := [][]NodeUsage{
-		{
-			NodeUsage{Node: &v1.Node{}, MonCount: 0, MonValid: false},
-		},
-	}
-	mon := &monConfig{DaemonName: "a"}
-	assert.Nil(t, scheduleMonitor(mon, nodeZones))
-
-	// 1 zone with 2 invalid empty node
-	nodeZones = [][]NodeUsage{
-		{
-			NodeUsage{Node: &v1.Node{}, MonCount: 0, MonValid: false},
-			NodeUsage{Node: &v1.Node{}, MonCount: 0, MonValid: false},
-		},
-	}
-	assert.Nil(t, scheduleMonitor(mon, nodeZones))
-
-	// 2 zone with 2 invalid empty node each
-	nodeZones = [][]NodeUsage{
-		{
-			NodeUsage{Node: &v1.Node{}, MonCount: 0, MonValid: false},
-			NodeUsage{Node: &v1.Node{}, MonCount: 0, MonValid: false},
-		},
-		{
-			NodeUsage{Node: &v1.Node{}, MonCount: 0, MonValid: false},
-			NodeUsage{Node: &v1.Node{}, MonCount: 0, MonValid: false},
-		},
-	}
-	assert.Nil(t, scheduleMonitor(mon, nodeZones))
-}
-
-func TestScheduleMonitor(t *testing.T) {
-	// 1 zone, 1 valid, empty node -> only one choice
-	nodeZones := [][]NodeUsage{
-		{
-			NodeUsage{Node: &v1.Node{}, MonCount: 0, MonValid: true},
-		},
-	}
-	mon := &monConfig{DaemonName: "a"}
-	assert.Equal(t, &nodeZones[0][0], scheduleMonitor(mon, nodeZones))
-
-	// still the only choice even if not empty
-	nodeZones = [][]NodeUsage{
-		{
-			NodeUsage{Node: &v1.Node{}, MonCount: 10, MonValid: true},
-		},
-	}
-	assert.Equal(t, &nodeZones[0][0], scheduleMonitor(mon, nodeZones))
-
-	// scheduler prefers the node with the least number of mons
-	nodeZones = [][]NodeUsage{
-		{
-			NodeUsage{Node: &v1.Node{}, MonCount: 10, MonValid: true},
-			NodeUsage{Node: &v1.Node{}, MonCount: 2, MonValid: true},
-			NodeUsage{Node: &v1.Node{}, MonCount: 5, MonValid: true},
-		},
-	}
-	assert.Equal(t, &nodeZones[0][1], scheduleMonitor(mon, nodeZones))
-
-	// the scheduler prefers nodes with the least number of mons, not zones with
-	// the leads number of mons (zero mons is a special case: tested below...)
-	nodeZones = [][]NodeUsage{
-		// 24 mons
-		{
-			NodeUsage{Node: &v1.Node{}, MonCount: 10, MonValid: true},
-			NodeUsage{Node: &v1.Node{}, MonCount: 4, MonValid: true},
-			NodeUsage{Node: &v1.Node{}, MonCount: 10, MonValid: true},
-		},
-		// 10 mons
-		{
-			NodeUsage{Node: &v1.Node{}, MonCount: 5, MonValid: true},
-			NodeUsage{Node: &v1.Node{}, MonCount: 5, MonValid: true},
-		},
-	}
-	// choose the node with 4 mons
-	assert.Equal(t, &nodeZones[0][1], scheduleMonitor(mon, nodeZones))
-
-	// same as before, the target mon is in the second zone
-	nodeZones = [][]NodeUsage{
-		// 6 mons
-		{
-			NodeUsage{Node: &v1.Node{}, MonCount: 2, MonValid: true},
-			NodeUsage{Node: &v1.Node{}, MonCount: 2, MonValid: true},
-			NodeUsage{Node: &v1.Node{}, MonCount: 2, MonValid: true},
-		},
-		// 10 mons
-		{
-			NodeUsage{Node: &v1.Node{}, MonCount: 1, MonValid: true},
-			NodeUsage{Node: &v1.Node{}, MonCount: 9, MonValid: true},
-		},
-	}
-	// choose the node with 1 mon
-	assert.Equal(t, &nodeZones[1][0], scheduleMonitor(mon, nodeZones))
-
-	// prefers a zone with zero mons to spread across failure domains
-	nodeZones = [][]NodeUsage{
-		// 0 mons
-		{
-			NodeUsage{Node: &v1.Node{}, MonCount: 0, MonValid: true},
-			NodeUsage{Node: &v1.Node{}, MonCount: 0, MonValid: true},
-			NodeUsage{Node: &v1.Node{}, MonCount: 0, MonValid: true},
-		},
-		// 1 mons
-		{
-			NodeUsage{Node: &v1.Node{}, MonCount: 0, MonValid: true},
-			NodeUsage{Node: &v1.Node{}, MonCount: 1, MonValid: true},
-		},
-	}
-	// choose the zone with zero mons
-	assert.Equal(t, &nodeZones[0][0], scheduleMonitor(mon, nodeZones))
-
-	// same as before, different zone
-	nodeZones = [][]NodeUsage{
-		// 0 mons
-		{
-			NodeUsage{Node: &v1.Node{}, MonCount: 0, MonValid: true},
-			NodeUsage{Node: &v1.Node{}, MonCount: 1, MonValid: true},
-			NodeUsage{Node: &v1.Node{}, MonCount: 0, MonValid: true},
-		},
-		// 1 mons
-		{
-			NodeUsage{Node: &v1.Node{}, MonCount: 0, MonValid: true},
-			NodeUsage{Node: &v1.Node{}, MonCount: 0, MonValid: true},
-		},
-	}
-	// choose the zone with zero mons
-	assert.Equal(t, &nodeZones[1][0], scheduleMonitor(mon, nodeZones))
-
-	// invalid nodes aren't schedulable, but if they have mons, that factors
-	// into the decision. in this case it means the zone isn't really empty
-	nodeZones = [][]NodeUsage{
-		// 0 mons
-		{
-			NodeUsage{Node: &v1.Node{}, MonCount: 0, MonValid: true},
-			// invalid node, but has a mon -> zone is not empty
-			NodeUsage{Node: &v1.Node{}, MonCount: 1, MonValid: false},
-			NodeUsage{Node: &v1.Node{}, MonCount: 0, MonValid: true},
-		},
-		// 1 mons
-		{
-			NodeUsage{Node: &v1.Node{}, MonCount: 0, MonValid: true},
-			NodeUsage{Node: &v1.Node{}, MonCount: 0, MonValid: true},
-		},
-	}
-	// choose the zone with zero mons
-	assert.Equal(t, &nodeZones[1][0], scheduleMonitor(mon, nodeZones))
 }

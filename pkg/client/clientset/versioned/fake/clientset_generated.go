@@ -26,14 +26,16 @@ import (
 	fakecephv1 "github.com/rook/rook/pkg/client/clientset/versioned/typed/ceph.rook.io/v1/fake"
 	cockroachdbv1alpha1 "github.com/rook/rook/pkg/client/clientset/versioned/typed/cockroachdb.rook.io/v1alpha1"
 	fakecockroachdbv1alpha1 "github.com/rook/rook/pkg/client/clientset/versioned/typed/cockroachdb.rook.io/v1alpha1/fake"
-	edgefsv1beta1 "github.com/rook/rook/pkg/client/clientset/versioned/typed/edgefs.rook.io/v1beta1"
-	fakeedgefsv1beta1 "github.com/rook/rook/pkg/client/clientset/versioned/typed/edgefs.rook.io/v1beta1/fake"
+	edgefsv1 "github.com/rook/rook/pkg/client/clientset/versioned/typed/edgefs.rook.io/v1"
+	fakeedgefsv1 "github.com/rook/rook/pkg/client/clientset/versioned/typed/edgefs.rook.io/v1/fake"
 	miniov1alpha1 "github.com/rook/rook/pkg/client/clientset/versioned/typed/minio.rook.io/v1alpha1"
 	fakeminiov1alpha1 "github.com/rook/rook/pkg/client/clientset/versioned/typed/minio.rook.io/v1alpha1/fake"
 	nfsv1alpha1 "github.com/rook/rook/pkg/client/clientset/versioned/typed/nfs.rook.io/v1alpha1"
 	fakenfsv1alpha1 "github.com/rook/rook/pkg/client/clientset/versioned/typed/nfs.rook.io/v1alpha1/fake"
 	rookv1alpha2 "github.com/rook/rook/pkg/client/clientset/versioned/typed/rook.io/v1alpha2"
 	fakerookv1alpha2 "github.com/rook/rook/pkg/client/clientset/versioned/typed/rook.io/v1alpha2/fake"
+	yugabytedbv1alpha1 "github.com/rook/rook/pkg/client/clientset/versioned/typed/yugabytedb.rook.io/v1alpha1"
+	fakeyugabytedbv1alpha1 "github.com/rook/rook/pkg/client/clientset/versioned/typed/yugabytedb.rook.io/v1alpha1/fake"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/watch"
 	"k8s.io/client-go/discovery"
@@ -98,9 +100,9 @@ func (c *Clientset) CockroachdbV1alpha1() cockroachdbv1alpha1.CockroachdbV1alpha
 	return &fakecockroachdbv1alpha1.FakeCockroachdbV1alpha1{Fake: &c.Fake}
 }
 
-// EdgefsV1beta1 retrieves the EdgefsV1beta1Client
-func (c *Clientset) EdgefsV1beta1() edgefsv1beta1.EdgefsV1beta1Interface {
-	return &fakeedgefsv1beta1.FakeEdgefsV1beta1{Fake: &c.Fake}
+// EdgefsV1 retrieves the EdgefsV1Client
+func (c *Clientset) EdgefsV1() edgefsv1.EdgefsV1Interface {
+	return &fakeedgefsv1.FakeEdgefsV1{Fake: &c.Fake}
 }
 
 // MinioV1alpha1 retrieves the MinioV1alpha1Client
@@ -116,4 +118,9 @@ func (c *Clientset) NfsV1alpha1() nfsv1alpha1.NfsV1alpha1Interface {
 // RookV1alpha2 retrieves the RookV1alpha2Client
 func (c *Clientset) RookV1alpha2() rookv1alpha2.RookV1alpha2Interface {
 	return &fakerookv1alpha2.FakeRookV1alpha2{Fake: &c.Fake}
+}
+
+// YugabytedbV1alpha1 retrieves the YugabytedbV1alpha1Client
+func (c *Clientset) YugabytedbV1alpha1() yugabytedbv1alpha1.YugabytedbV1alpha1Interface {
+	return &fakeyugabytedbv1alpha1.FakeYugabytedbV1alpha1{Fake: &c.Fake}
 }

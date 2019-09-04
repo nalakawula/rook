@@ -25,6 +25,8 @@ import (
 	apps "k8s.io/api/apps/v1"
 	v1 "k8s.io/api/apps/v1"
 	batchv1 "k8s.io/api/batch/v1"
+	corev1 "k8s.io/api/core/v1"
+	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
 )
@@ -200,6 +202,16 @@ func AddLabelToDeployement(key, value string, d *v1.Deployment) {
 	addLabel(key, value, d.Labels)
 }
 
+func AddLabelToPod(key, value string, p *corev1.PodTemplateSpec) {
+	if p == nil {
+		return
+	}
+	if p.Labels == nil {
+		p.Labels = map[string]string{}
+	}
+	addLabel(key, value, p.Labels)
+}
+
 func AddLabelToJob(key, value string, b *batchv1.Job) {
 	if b == nil {
 		return
@@ -212,4 +224,17 @@ func AddLabelToJob(key, value string, b *batchv1.Job) {
 
 func addLabel(key, value string, labels map[string]string) {
 	labels[key] = value
+}
+
+func CreateDeployment(name, namespace string, clientset kubernetes.Interface, dep *apps.Deployment) error {
+	_, err := clientset.AppsV1().Deployments(namespace).Create(dep)
+	if err != nil {
+		if k8serrors.IsAlreadyExists(err) {
+			_, err = clientset.AppsV1().Deployments(namespace).Update(dep)
+		}
+		if err != nil {
+			return fmt.Errorf("failed to start %s deployment: %+v\n%+v", name, err, dep)
+		}
+	}
+	return err
 }

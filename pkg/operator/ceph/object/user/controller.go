@@ -20,6 +20,10 @@ package objectuser
 import (
 	"fmt"
 	"reflect"
+	"time"
+
+	"k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/util/wait"
 
 	"github.com/coreos/pkg/capnslog"
 	opkit "github.com/rook/operator-kit"
@@ -28,7 +32,7 @@ import (
 	cephconfig "github.com/rook/rook/pkg/daemon/ceph/config"
 	"github.com/rook/rook/pkg/operator/ceph/object"
 	"github.com/rook/rook/pkg/operator/k8sutil"
-	"k8s.io/api/core/v1"
+	v1 "k8s.io/api/core/v1"
 	apiextensionsv1beta1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1beta1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/tools/cache"
@@ -52,17 +56,19 @@ var ObjectStoreUserResource = opkit.CustomResource{
 
 // ObjectStoreUserController represents a controller object for object store user custom resources
 type ObjectStoreUserController struct {
-	context   *clusterd.Context
-	ownerRef  metav1.OwnerReference
-	namespace string
+	context     *clusterd.Context
+	ownerRef    metav1.OwnerReference
+	clusterSpec *cephv1.ClusterSpec
+	namespace   string
 }
 
 // NewObjectStoreUserController create controller for watching object store user custom resources created
-func NewObjectStoreUserController(context *clusterd.Context, namespace string, ownerRef metav1.OwnerReference) *ObjectStoreUserController {
+func NewObjectStoreUserController(context *clusterd.Context, clusterSpec *cephv1.ClusterSpec, namespace string, ownerRef metav1.OwnerReference) *ObjectStoreUserController {
 	return &ObjectStoreUserController{
-		context:   context,
-		ownerRef:  ownerRef,
-		namespace: namespace,
+		context:     context,
+		ownerRef:    ownerRef,
+		clusterSpec: clusterSpec,
+		namespace:   namespace,
 	}
 }
 
@@ -110,7 +116,8 @@ func (c *ObjectStoreUserController) onDelete(obj interface{}) {
 	}
 }
 
-func (c *ObjectStoreUserController) ParentClusterChanged(cluster cephv1.ClusterSpec, clusterInfo *cephconfig.ClusterInfo) {
+// ParentClusterChanged determines wether or not a CR update has been sent
+func (c *ObjectStoreUserController) ParentClusterChanged(cluster cephv1.ClusterSpec, clusterInfo *cephconfig.ClusterInfo, isUpgrade bool) {
 	logger.Debugf("No need to update object store users after the parent cluster changed")
 }
 
@@ -138,7 +145,7 @@ func (c *ObjectStoreUserController) createUser(context *clusterd.Context, u *cep
 	if err := ValidateUser(context, u); err != nil {
 		return fmt.Errorf("invalid user %s arguments. %+v", u.Name, err)
 	}
-	//Set DisplayName to match Name if DisplayName is not set
+	// Set DisplayName to match Name if DisplayName is not set
 	displayName := u.Spec.DisplayName
 	if len(displayName) == 0 {
 		displayName = u.Name
@@ -151,6 +158,44 @@ func (c *ObjectStoreUserController) createUser(context *clusterd.Context, u *cep
 		DisplayName: &displayName,
 	}
 	objContext := object.NewContext(context, u.Spec.Store, u.Namespace)
+
+	err := wait.Poll(time.Second*15, time.Minute*5, func() (ok bool, err error) {
+		// check if CephObjectStore CR is created
+		logger.Infof("waiting for CephObjectStore %s to be created", u.Spec.Store)
+		_, err = context.RookClientset.CephV1().CephObjectStores(u.Namespace).Get(u.Spec.Store, metav1.GetOptions{})
+		// wait only if objectStore is not found. return on any other error
+		if err != nil {
+			if errors.IsNotFound(err) {
+				return false, nil
+			}
+			logger.Errorf("CephObjectStore %s could not be found. %+v", u.Spec.Store, err)
+			return true, err
+		}
+		// check if ObjectStore is initialized
+		// rook does this by starting the RGW pod(s)
+		selector := fmt.Sprintf("%s=%s,%s=%s",
+			"rgw", u.Spec.Store,
+			k8sutil.AppAttr, appName,
+		)
+		logger.Infof("waiting for CephObjectStore %s to be initialized", u.Spec.Store)
+		pods, err := context.Clientset.CoreV1().Pods(u.Namespace).List(metav1.ListOptions{LabelSelector: selector, FieldSelector: "status.phase=Running"})
+		if err != nil {
+			if errors.IsNotFound(err) {
+				return false, nil
+			}
+			logger.Errorf("CephObjectStore %s may not be initialized. %+v", u.Spec.Store, err)
+			return true, err
+		}
+		// check if atleast one pod is running
+		if pods != nil {
+			logger.Infof("CephObjectStore %s has been created successfully", u.Spec.Store)
+			return true, nil
+		}
+		return false, nil
+	})
+	if err != nil {
+		logger.Errorf("timed out while waiting for objectstore %s to be ready. %+v", u.Spec.Store, err)
+	}
 
 	user, rgwerr, err := object.CreateUser(objContext, userConfig)
 	if err != nil {
